@@ -13,7 +13,7 @@
   "skills": "./skills",
   "mcpServers": {
     "hermetiq": {
-      "type": "url",
+      "type": "http",
       "url": "https://mcp.cloud-usc1.hermetiq.io"
     }
   }
