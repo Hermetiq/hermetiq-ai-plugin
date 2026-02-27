@@ -1,0 +1,20 @@
+{
+  "name": "hermetiq",
+  "version": "1.0.0",
+  "description": "Bazel build optimization skill powered by Hermetiq analytics",
+  "author": {
+    "name": "Hermetiq",
+    "url": "https://hermetiq.com"
+  },
+  "homepage": "https://hermetiq.com/docs",
+  "repository": "https://github.com/Hermetiq/hermetiq-ai-plugin",
+  "license": "Apache-2.0",
+  "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
+  "skills": "./skills",
+  "mcpServers": {
+    "hermetiq": {
+      "type": "url",
+      "url": "https://mcp.cloud-usc1.hermetiq.io"
+    }
+  }
+}

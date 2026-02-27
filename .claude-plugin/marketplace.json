@@ -1,0 +1,22 @@
+{
+  "name": "hermetiq",
+  "owner": {
+    "name": "Hermetiq",
+    "email": "support@hermetiq.com"
+  },
+  "metadata": {
+    "description": "Hermetiq plugins for Bazel build optimization and analytics",
+    "version": "1.0.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "hermetiq",
+      "source": "./plugins/hermetiq",
+      "description": "Bazel build optimization skill with deep Buildbarn and remote execution expertise. Interprets Hermetiq MCP tool results with domain knowledge.",
+      "version": "1.0.0",
+      "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
+      "license": "Apache-2.0"
+    }
+  ]
+}
