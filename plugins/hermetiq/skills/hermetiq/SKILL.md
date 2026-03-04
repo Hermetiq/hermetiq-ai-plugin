@@ -1,5 +1,5 @@
 ---
-name: hermetiq-expert
+name: hermetiq
 description: >
   Bazel build optimization expert using Hermetiq's analytics platform. Use when helping users
   understand build performance, improve cache hit rates, reduce remote execution costs, diagnose
