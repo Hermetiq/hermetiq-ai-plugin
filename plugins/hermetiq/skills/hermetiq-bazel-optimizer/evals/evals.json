@@ -1,0 +1,23 @@
+{
+  "skill_name": "hermetiq-bazel-optimizer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My build took 12 minutes today but it usually takes about 4 minutes. I didn't change much code — just a small fix in one file. The invocation ID is 550e8400-e29b-41d4-a716-446655440000. Can you figure out what happened?",
+      "expected_output": "Should follow the 'Why is my build slow?' playbook: fetch the invocation, check cache hit rate, analyze remote execution phases, compare to recent history. Should identify the root cause (likely cache miss regression) with specific numbers and a prioritized recommendation.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "We're spending way too much on our build infrastructure. Our monthly bill has gone up 40% in the last quarter but we haven't added that many more targets. Can you help us figure out where the money is going and what we can cut?",
+      "expected_output": "Should follow the 'Reduce our build costs' playbook: pull cost trends over 30 days, identify expensive targets and action types, check CPU efficiency for I/O-bound actions that could run locally, assess fleet utilization. Should deliver prioritized recommendations with estimated dollar savings.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Our cache hit rate has been dropping steadily over the past two weeks. It used to be around 85% and now it's hovering around 60%. We haven't changed our .bazelrc or toolchain recently. What's going on?",
+      "expected_output": "Should follow the 'Improve our cache hit rate' playbook: pull cache trends, identify which mnemonics degraded, drill into miss reasons with miss analysis. Should check for storage eviction pressure, configuration drift between users, or new volatile codegen. Should reference build-configuration.md for detailed flag audit if needed.",
+      "files": []
+    }
+  ]
+}

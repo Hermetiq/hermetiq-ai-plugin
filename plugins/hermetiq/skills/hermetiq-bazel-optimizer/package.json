@@ -1,0 +1,7 @@
+{
+  "name": "hermetiq-bazel-optimizer",
+  "version": "1.0.0",
+  "description": "Agent SKILL for optimizing Bazel builds with build data enriched with Hermetiq ",
+  "type": "markdown",
+  "main": "SKILL.md",
+}
