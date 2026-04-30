@@ -8,7 +8,7 @@ description: >
   configuration, debug test failures, or compare build performance across time periods. Combines
   deep Bazel and Buildbarn knowledge with Hermetiq's data model to deliver actionable,
   data-driven recommendations.
-argument-hint: "[invocation-id], question, or optimization goal"
+argument-hint: "[build-id or invocation-id], question, or optimization goal"
 ---
 
 # Hermetiq Bazel Build Optimizer
@@ -38,11 +38,13 @@ users' source code, BUILD files, or `.bazelrc` directly — infer build structur
 
 Use this triage flow when the user asks a broad question:
 1. **Resolve project context**:
-   - If user gives an invocation ID, call GetInvocation directly.
-   - Otherwise, list candidate builds with ListInvocations and pick a recent relevant invocation.
+   - If user gives an opaque build or invocation ID, call ResolveBuildOrInvocation.
+   - If it resolves to a build, use GetBuildDetails; if it resolves to an invocation, use GetInvocation.
+   - Otherwise, list candidate logical builds with ListBuilds and pick a recent relevant build.
 2. **Get baseline**:
-   - Call GetInvocation for the selected build.
-   - Call GetCacheEventAgg if performance/cost is in scope.
+   - Call GetBuildDetails for logical build overview and build-scoped action analytics.
+   - Use the primary invocation_id from the build when calling invocation-level tools such as
+     GetCacheEventAgg, GetRemoteExecutionAnalytics, GetBuildParallelism, or GetTestResults.
 3. **Branch by dominant signal**:
    - Low cache hit rate → cache miss workflow.
    - High queue or fetch timing → infrastructure workflow.
@@ -52,19 +54,36 @@ Use this triage flow when the user asks a broad question:
 
 | User Intent | Start With | Drill Down With |
 |-------------|-----------|----------------|
-| "Why is this build slow?" | GetInvocation, GetCacheEventAgg | GetRemoteExecutionAnalytics, GetBuildParallelism |
+| "Why is this build slow?" | ResolveBuildOrInvocation, GetBuildDetails or GetInvocation | GetCacheEventAgg, GetRemoteExecutionAnalytics, GetBuildParallelism |
 | "Debug cache misses" | GetCacheEventAgg | FindCacheEventGroups → FindCacheEvents (`include_miss_analysis=true`) |
-| "Which tests failed?" | GetTestResults (`include_logs=true`) | GetActionExecutedDetails, FindActions (`result_filter=ACTION_FAILED`) |
-| "Why did the build fail?" | GetInvocation | FindActions (`result_filter=ACTION_FAILED`), GetActionExecutedDetails |
-| "Show build trends" | show_trends_dashboard or GetTrendsAgg | GetCacheTrends, GetRemoteActionTrends |
+| "Which tests failed?" | ResolveBuildOrInvocation, then GetTestResults (`include_logs=true`) | GetActionExecutedDetails, FindActions (`result_filter=ACTION_FAILED`) |
+| "Why did the build fail?" | ResolveBuildOrInvocation, GetBuildDetails or GetInvocation | FindActions (`result_filter=ACTION_FAILED`), GetActionExecutedDetails |
+| "Show build trends" | show_trends_dashboard, GetBuildHistorySummary, or GetTrendsAgg | GetBuildTimeseriesAgg, GetCacheTrends, GetRemoteActionTrends |
 | "Compare this week vs last" | GetTrendsAgg (has period-over-period) | GetRemoteActionTrends, GetCacheTrends |
 | "Is infrastructure the issue?" | GetInfraHealthSummary | GetSchedulerQueueHealth, GetStorageHealth, GetWorkerFleetHealth |
 | "Reduce build costs" | GetRemoteActionTrends (`time_range="30d"`) | GetRemoteExecutionAnalytics, GetNamespaceCosts |
 | "Deep-dive a remote action" | FindRemoteActionGroups | FindRemoteActions, GetRemoteActionCommand |
 | "Phase timing distribution" | GetRemoteActionTrends | GetRemoteActionTiming (per mnemonic, per phase) |
-| "What filters are available?" | GetFilters or GetFilterValues | ListInvocations with filters applied |
-| "Timeline of builds" | GetInvocationTimeseries | GetInvocationTimeseriesAgg (bucketed counts) |
+| "What filters are available?" | GetFilters or GetFilterValues | ListBuilds or ListInvocations with filters applied |
+| "Timeline of builds" | GetBuildTimeseriesAgg | GetInvocationTimeseriesAgg (attempt-level counts) |
+| "Which targets are trending?" | GetTargetTrends | GetTargetTrendDetail |
 | "Audit build configuration" | ListInvocations (find candidates) | GetInvocation (`include_cmd_line=true`), GetCacheTrends, FindCacheEvents |
+
+### Common Parameter Notes
+
+- Use `time_range` for all query tools (e.g. `"7d"`, `"15d"`, `"30d"`). The MCP server handles parameter mapping.
+- Use `platform_name` (not `platform`) for platform filtering in ListBuilds, ListInvocations, and trend tools.
+- The `command` field is a list; for one command use `command=["build"]`.
+- Use `build_id` with build-level tools (`GetBuild`, `GetBuildDetails`,
+  `GetBuildTargetFastAnalytics`, `GetBuildTargetSlowAnalytics`). Use `invocation_id` with
+  per-attempt tools (`GetInvocation`, cache event tools, remote execution analytics, actions,
+  targets, tests, and parallelism).
+- `ListBuilds`, `GetBuildHistorySummary`, and `GetBuildTimeseriesAgg` group invocations by
+  `build_id` and take filters through `invocation_filter`; common top-level aliases such as
+  `project_id`, `time_range`, and `status` are accepted by the MCP server.
+- Build grouping supports `BuildAggregationOptions`: `match_scope` controls which invocations
+  make a build match; `rollup_scope` controls whether rollups use only matching invocations or
+  all invocations in selected builds.
 
 ### Two-Level Drill-Down Pattern
 
@@ -72,17 +91,18 @@ For cache and remote action analysis, always start with **groups** to identify p
 then drill into **individual events** for detail:
 - `FindCacheEventGroups` → `FindCacheEvents` (narrow by mnemonic or target)
 - `FindRemoteActionGroups` → `FindRemoteActions` (narrow by target or mnemonic)
+- `GetTargetTrends` → `GetTargetTrendDetail` (narrow by target label or kind)
 
 ### Available MCP Prompts
 
 The MCP server provides prompts that orchestrate multi-tool workflows: `select_project`,
-`debug_cache_misses`, `analyze_build`, `investigate_failure`, `project_health`, `cost_analysis`,
-`find_slow_builds`, `weekly_trends_report`, `cache_trends`, `rbe_trends`, `rbe_optimization`,
-`compare_periods`, `infra_health`. Use these when they match the user's intent — this skill
+`debug_cache_misses`, `analyze_build`, `investigate_failure`, `test_failures`, `project_health`,
+`cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`, `rbe_trends`,
+`rbe_optimization`, `compare_periods`, `infra_health`. Use these when they match the user's intent — this skill
 enhances interpretation of their results.
 
 If prompt execution is unavailable in the current client, use direct tool-call equivalents:
-- `analyze_build` → GetInvocation, GetCacheEventAgg, GetRemoteExecutionAnalytics
+- `analyze_build` → ResolveBuildOrInvocation, GetBuildDetails or GetInvocation, GetCacheEventAgg, GetRemoteExecutionAnalytics
 - `debug_cache_misses` → GetCacheEventAgg, FindCacheEventGroups, FindCacheEvents (`include_miss_analysis=true`)
 - `infra_health` → GetInfraHealthSummary, then GetSchedulerQueueHealth/GetStorageHealth/GetWorkerFleetHealth
 
@@ -299,17 +319,20 @@ Step-by-step workflows for common user requests.
 
 ### Playbook: "Why is my build slow?"
 
-1. **Get build overview**: GetInvocation → note duration, exit_code, remote_cache_hits vs
-   total_executions. Calculate approximate hit rate.
-2. **Check cache performance**: GetCacheEventAgg → if hit_rate < 80%, this is likely the
+1. **Resolve and summarize**: ResolveBuildOrInvocation for opaque IDs. Use GetBuildDetails for
+   logical builds or GetInvocation for a single attempt. Note duration, exit_code, and attempts.
+2. **Check target shape**: For build IDs, call GetBuildTargetFastAnalytics or GetTargetTrends
+   to see whether specific targets dominate recent duration or failure counts.
+3. **Check cache performance**: Use the primary invocation_id with GetCacheEventAgg → if
+   hit_rate < 80%, this is likely the
    primary issue. Jump to cache optimization.
-3. **Analyze remote execution**: GetRemoteExecutionAnalytics → look at phase timing.
+4. **Analyze remote execution**: GetRemoteExecutionAnalytics → look at phase timing.
    Which phase dominates? (Queue = infrastructure, execution = action, fetch/upload = I/O)
-4. **Check parallelism**: GetBuildParallelism → is the build achieving good concurrency?
+5. **Check parallelism**: GetBuildParallelism → is the build achieving good concurrency?
    Low parallelism + long duration = critical path problem or worker shortage.
-5. **Compare to history**: ListInvocations (`time_range_duration_from_now="7d"`, same
+6. **Compare to history**: ListBuilds (`time_range="7d"`, same
    `command` and `pattern`, `pagination.sort_by="duration"`) → is this an outlier or regression?
-6. **Check infrastructure** (if queue or fetch times are high):
+7. **Check infrastructure** (if queue or fetch times are high):
    GetInfraHealthSummary scoped to this build → identify component-level issues.
 
 ### Playbook: "Improve our cache hit rate"
@@ -341,14 +364,16 @@ Step-by-step workflows for common user requests.
 ### Playbook: "Our builds got slower this week"
 
 1. **Quantify the regression**: GetTrendsAgg (`time_range="7d"`) → compare to previous period.
-2. **Visualize the timeline**: GetInvocationTimeseries (`time_range_duration_from_now="14d"`,
-   same `command` and `pattern`) → pinpoint when the regression started.
+2. **Visualize the timeline**: GetBuildTimeseriesAgg (`time_range="14d"`,
+   same `command` and `pattern`) → pinpoint when the regression started at logical-build level.
 3. **Check if it is cache degradation**: GetCacheTrends (`time_range="7d"`) → did hit rates drop?
 4. **Check if it is infrastructure**: GetRemoteActionTrends (`time_range="7d"`) → are queue
    times up? If yes, check GetInfraHealthSummary for recent builds.
-5. **Check if it is more work**: Are `total_executions` or `actions_created` trending up?
+5. **Check target-level contributors**: GetTargetTrends (`time_range="7d"`) → are a few
+   targets responsible for most new duration or failures?
+6. **Check if it is more work**: Are `total_executions` or `actions_created` trending up?
    If so, the build got larger (more targets, new code), not slower per-action.
-6. **Compare specific builds**: Pick a fast build from before the regression and a slow one
+7. **Compare specific builds**: Pick a fast build from before the regression and a slow one
    after. Compare their GetRemoteExecutionAnalytics side by side.
 
 ### Playbook: "Optimize remote execution"
@@ -392,7 +417,7 @@ Step-by-step workflows for common user requests.
 ### Playbook: "Audit our build configuration"
 
 1. **Gather configuration data**:
-   - ListInvocations (`time_range_duration_from_now="7d"`) to select representative builds.
+   - ListInvocations (`time_range="7d"`) to select representative builds.
    - For each selected invocation, call GetInvocation (`include_cmd_line=true`) to examine flags.
 2. **Check for flag drift**: Compare flags across users, branches, and CI versus local builds.
    Look for inconsistencies in `--define`, `--copt`, `--platform_suffix`, and `--action_env`.
@@ -411,12 +436,13 @@ Step-by-step workflows for common user requests.
 3. **For TIMEOUT tests**: Check GetRemoteExecutionAnalytics for resource contention during
    the build window. Check if worker CPU was saturated via GetWorkerFleetHealth.
 4. **For FLAKY tests**: ListInvocations for the same `target_pattern` over
-   `time_range_duration_from_now="7d"` → correlate flakiness with infra or cache issues.
+   `time_range="7d"` → correlate flakiness with infra or cache issues.
 5. **For REMOTE_FAILURE**: Check GetInfraHealthSummary → was infrastructure unhealthy?
 
 ### Playbook: "Investigate a build failure"
 
-1. **Get build overview**: GetInvocation → check exit_code, failure messages, build duration.
+1. **Resolve and summarize**: ResolveBuildOrInvocation for opaque IDs. Use GetBuildDetails for
+   build IDs or GetInvocation for invocation IDs. Check exit_code, failure messages, and duration.
 2. **Find failing actions**: FindActions (`result_filter=ACTION_FAILED`) → identify which
    actions failed and their mnemonics.
 3. **Get failure details**: GetActionExecutedDetails for the failed action IDs → read
@@ -441,7 +467,7 @@ developers using different flags produce different action cache keys, fragmentin
 
 **How to detect drift from Hermetiq data**:
 1. **Cross-user comparison**: ListInvocations filtered by different `user` values over the
-   same `time_range_duration_from_now`. Then inspect command lines via GetInvocation
+   same `time_range`. Then inspect command lines via GetInvocation
    (`include_cmd_line=true`) for a representative sample.
 2. **CI versus local builds**: Filter by `role` or `host` to separate CI from developer builds.
 3. **Branch-specific configuration**: Filter by `branch` to check for flag differences.
