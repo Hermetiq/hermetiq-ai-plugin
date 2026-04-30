@@ -2,8 +2,14 @@
 
 ## Tool Call Constraints (Important)
 
+- Prefer `ListBuilds` for user-facing build history because it groups multiple attempts by
+  `build_id`. Use `ListInvocations` when you specifically need individual attempts.
+- Use `ResolveBuildOrInvocation` when the user provides an opaque ID from a URL, copied text,
+  or older permalink. It tells you whether to call build-level or invocation-level tools.
 - `ListInvocations` does not return full command-line arguments. To audit flags, first select
   invocations with `ListInvocations`, then call `GetInvocation(include_cmd_line=true)` for each.
+- `ListBuilds`, `GetBuildHistorySummary`, and `GetBuildTimeseriesAgg` filter through
+  `invocation_filter`; use `BuildAggregationOptions` to choose match and rollup semantics.
 - Prefer stable aggregation tools (`GetRemoteExecutionAnalytics`, `GetRemoteActionTrends`) for
   transfer and timing bottlenecks before drilling into individual `FindRemoteActions` records.
 - When prompt orchestration is unavailable in a client, use direct tool-call equivalents from
@@ -13,10 +19,26 @@
 
 ## Hermetiq Data Model
 
-### Invocation (Build)
-The root entity. One per `bazel build|test|run|query` command execution.
+### Build
+The logical build entity. One `build_id` can contain multiple invocations/attempts for retries,
+reruns, or related upload flows. Build-level tools aggregate attempts by `build_id` and are the
+right starting point for user-facing history, summaries, build detail pages, and trend cards.
+
+Key build-level tools:
+- `ListBuilds` — paginated logical build history grouped by `build_id`
+- `GetBuild` / `GetBuildDetails` — one logical build and its attempts
+- `GetBuildHistorySummary` — summary counts over a build universe
+- `GetBuildTimeseriesAgg` — build-level counts over time
+- `GetBuildTargetFastAnalytics` / `GetBuildTargetSlowAnalytics` — build-scoped target analytics
+
+### Invocation (Attempt)
+One per `bazel build|test|run|query` command execution. Use invocation-level tools when a
+workflow needs a concrete attempt, per-action data, logs, command lines, tests, cache events,
+remote execution analytics, or parallelism data.
 
 Key fields for optimization analysis:
+- `id` — invocation_id for one attempt
+- `buildId` — logical build_id shared by related attempts when present
 - `remoteCache` / `remoteExecution` — Whether remote cache and remote execution were enabled
 - `remoteCacheEligible` — Actions that were eligible for remote caching, excludes `internalExecutions`, `localExecutions`, and `diskCacheHits`
 - `remoteCacheHits` / `remoteCacheEligible` — Quick cache hit rate: `hits / total`
@@ -87,6 +109,19 @@ Key fields:
 
 ## Hermetiq Aggregated Analytics
 
+### Build History (logical build grouping)
+- `ListBuilds` — grouped build rows with primary invocation, attempt counts, status rollups,
+  cache/execution totals, and pagination.
+- `GetBuildHistorySummary` — total logical builds plus success, failure, interrupted, and
+  in-progress counts over the selected build universe.
+- `GetBuildTimeseriesAgg` — build counts bucketed by time with build-level status rollups.
+- `BuildAggregationOptions.match_scope`:
+  - `ANY_MATCHING_INVOCATION` — a build matches if any invocation matches the filters.
+  - `LATEST_INVOCATION_ONLY` — a build matches based on its latest invocation only.
+- `BuildAggregationOptions.rollup_scope`:
+  - `MATCHING_INVOCATIONS_ONLY` — rollups summarize only matching invocations.
+  - `ALL_INVOCATIONS_IN_SELECTED_BUILDS` — rollups include every invocation for selected builds.
+
 ### CacheEventAgg (per-invocation)
 - `total`, `hits`, `misses`, `hit_rate`
 - `by_mnemonic` — Per-action-type breakdown
@@ -126,6 +161,15 @@ Key fields:
 - `io_hotspots` — Top 50 by block I/O
 - `cpu_efficiency_by_mnemonic` — Utilization percentage, user/system ratio, I/O-bound count
 - `fleet_utilization` — Daily unique workers, churn (new versus returning), average actions/worker
+
+### TargetTrends (cross-build, time-windowed)
+- `summary` — total target runs, distinct targets, distinct invocations, success/failure counts,
+  and total/average duration.
+- `targets` — paginated per-target rows with kind, run count, invocation count, success/failure
+  counts, total duration, and min/average/max duration.
+- `GetTargetTrendDetail` — daily duration buckets and recent invocations for one target row.
+- Use this when build duration or failures appear concentrated in a few targets, or when users
+  ask which targets are getting slower over time.
 
 ---
 
