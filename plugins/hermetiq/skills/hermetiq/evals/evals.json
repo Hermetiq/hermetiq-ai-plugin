@@ -1,0 +1,23 @@
+{
+  "skill_name": "hermetiq",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My build took 12 minutes today but it usually takes about 4 minutes. I didn't change much code — just a small fix in one file. The invocation ID is 550e8400-e29b-41d4-a716-446655440000. Can you figure out what happened?",
+      "expected_output": "Should follow the 'Why is my build slow?' playbook: call ResolveBuildOrInvocation for the opaque ID, use GetInvocation for an invocation ID or GetBuildDetails for a build ID, check cache hit rate with GetCacheEventAgg, analyze remote execution phases with GetRemoteExecutionAnalytics, and compare to recent history with ListBuilds using time_range=\"7d\" where applicable. Should identify the root cause with specific numbers and a prioritized recommendation.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "We're spending way too much on our build infrastructure. Our monthly bill has gone up 40% in the last quarter but we haven't added that many more targets. Can you help us figure out where the money is going and what we can cut?",
+      "expected_output": "Should follow the 'Reduce our build costs' playbook: pull cost trends with GetRemoteActionTrends using time_range=\"30d\", identify expensive targets and action types, check CPU efficiency for I/O-bound actions that could run locally, assess fleet utilization, and use GetNamespaceCosts or GetCostSummary when infrastructure cost detail is needed. Should deliver prioritized recommendations with estimated dollar savings only when the required inputs are present.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Our cache hit rate has been dropping steadily over the past two weeks. It used to be around 85% and now it's hovering around 60%. We haven't changed our .bazelrc or toolchain recently. What's going on?",
+      "expected_output": "Should follow the 'Improve our cache hit rate' playbook: pull cache trends with GetCacheTrends using time_range=\"14d\" or time_range=\"30d\", identify which mnemonics degraded with GetCacheEventAgg or FindCacheEventGroups, drill into miss reasons with FindCacheEvents include_miss_analysis=true, and check for storage eviction pressure, configuration drift between users, or volatile code generation. Should reference build-configuration.md for detailed flag audits when configuration drift is suspected.",
+      "files": []
+    }
+  ]
+}

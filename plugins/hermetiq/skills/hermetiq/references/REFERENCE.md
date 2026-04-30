@@ -10,6 +10,8 @@
   invocations with `ListInvocations`, then call `GetInvocation(include_cmd_line=true)` for each.
 - `ListBuilds`, `GetBuildHistorySummary`, and `GetBuildTimeseriesAgg` filter through
   `invocation_filter`; use `BuildAggregationOptions` to choose match and rollup semantics.
+- `GetFilters` excludes high-cardinality pattern values to keep filter loads bounded. Use
+  `LookupPatternsForFilters(project_id, query)` for project-scoped pattern type-ahead lookups.
 - Prefer stable aggregation tools (`GetRemoteExecutionAnalytics`, `GetRemoteActionTrends`) for
   transfer and timing bottlenecks before drilling into individual `FindRemoteActions` records.
 - When prompt orchestration is unavailable in a client, use direct tool-call equivalents from
@@ -170,6 +172,27 @@ Key fields:
 - `GetTargetTrendDetail` — daily duration buckets and recent invocations for one target row.
 - Use this when build duration or failures appear concentrated in a few targets, or when users
   ask which targets are getting slower over time.
+
+### Project-Level Action and Activity Tools
+
+These all take a `TrendsAggregatedRequest` (`project_id`, `time_range`, optional `filters` as a
+`ListInvocationsRequest`) and return project-scoped rollups. `time_range` accepts `"7d"`, `"15d"`,
+or `"30d"`.
+
+- `GetProjectActivity` — high-level project activity counts and trends. Use for "how active is
+  this project?" overview cards and for sanity-checking whether a project is still in use before
+  recommending optimizations.
+- `GetFailedActions` — top failed actions, daily failure counts, failure-detail breakdown,
+  failure novelty, and aborted reasons. Use for project-wide failure pattern analysis when a
+  single-build view (`FindActions(result_filter=ACTION_FAILED)`) is insufficient.
+- `GetFlakyActions` — flakiest actions across the project. Loaded asynchronously by dashboards
+  because the analysis is more expensive than the standard failure rollup. Use for the FLAKY
+  bucket in test-failure investigations.
+
+### Pattern Type-Ahead
+
+- `LookupPatternsForFilters(project_id, query)` returns a bounded subset of Bazel patterns for
+  type-ahead UIs. `GetFilters` intentionally excludes patterns due to their cardinality.
 
 ---
 
@@ -484,91 +507,3 @@ Hermetiq creates 50+ recording rules for Buildbarn metrics:
 - `bb:grpc_server_msg_sent_total` / `bb:grpc_server_msg_received_total` — Message rates
 
 ---
-
-## Build Configuration Reference
-
-### Hermeticity Flag Audit
-
-When cache hit rates are poor, verify these flags from invocation data. If a flag is missing,
-recommend adding it to the project's shared `.bazelrc`:
-
-| Flag | Purpose | How to Detect Absence |
-|------|---------|----------------------|
-| `--incompatible_strict_action_env` | Prevents environment variable leakage into actions | `ENV_CHANGED` miss reasons; different cache keys for identical code across machines |
-| `--nostamp` | Disables volatile timestamp/git-SHA embedding | `INPUT_CHANGED` misses on stamped targets; volatile workspace_status in command line |
-| `--noexperimental_check_external_repository_files` | Avoids unnecessary re-fetching of external repos | Slow analysis phase; cache misses after repo fetch |
-| `--experimental_remote_cache_compression` | Compresses Content Addressable Storage transfers | High input fetch and output upload times with moderate blob sizes |
-| `--remote_download_minimal` | Only downloads outputs needed locally (builds without the bytes) | High bytes received in BuildMetrics; long output download phases |
-
-### Remote Execution Flag Tuning
-
-These flags affect remote execution performance. Recommend values based on observed metrics:
-
-| Flag | What It Controls | How to Tune from Data |
-|------|-----------------|----------------------|
-| `--jobs=<N>` | Maximum concurrent actions | Compare to GetBuildParallelism peak. If parallelism plateaus below `--jobs`, the build graph is the bottleneck, not the job limit. If it hits `--jobs` consistently, increase it. Default for remote execution is 200. |
-| `--remote_timeout=<seconds>` | Per-action timeout for remote execution | Check slowest actions in GetRemoteExecutionAnalytics. Set to 2-3x the slowest expected action. Default 3600s (1 hour) is usually sufficient. |
-| `--remote_retries=<N>` | Retry count for transient remote failures | Check action failure rates in GetGrpcHealth. If transient errors are common, increase from default 5. If errors are deterministic, retries waste time. |
-| `--remote_default_exec_properties` | Default platform properties for remote actions | Check GetSchedulerQueueHealth per-platform breakdown. Ensure these match the worker platforms that have capacity. |
-
-### Common `.bazelrc` Optimizations
-
-**Cache hermeticity flags**:
-- `build --incompatible_strict_action_env` — Prevents environment variable leakage
-- `build --noexperimental_check_external_repository_files` — Avoids re-fetching external repos
-- `build --experimental_repository_cache_hardlinks` — Reduces disk usage for external repos
-
-**Remote execution tuning**:
-- `build --remote_timeout=3600` — Prevent timeouts on long-running actions
-- `build --remote_retries=5` — Retry transient failures
-- `build --jobs=<N>` — Control parallelism (default is 200 for remote; adjust based on data)
-- `build --experimental_remote_cache_compression` — Compress storage transfers (reduces I/O time)
-- `build --remote_download_minimal` — Only download outputs needed locally (builds without the bytes)
-- `build --noremote_upload_local_results` — Do not push local execution results to remote cache
-
-**Stamping (common cache killer)**:
-- `build --nostamp` — Disable stamping globally (biggest quick-win for many projects)
-- `build:release --stamp` — Only enable stamping for release builds
-
-**Platform configuration**:
-- `build --remote_default_exec_properties=OSFamily=Linux` — Ensure consistent platform matching
-- Use platform mappings to control which actions run remotely versus locally
-
-### Build Graph Anti-Patterns
-
-When you see these in Hermetiq data, recommend specific fixes:
-
-1. **Mega-target**: A single target with hundreds of source files.
-   - **Signal**: One target appears repeatedly in `expensive_targets` with high action count
-   - **Fix**: Split into smaller libraries with narrower visibility
-
-2. **Deep dependency chain**: Long sequential chains of actions.
-   - **Signal**: Low parallelism in GetBuildParallelism despite many total actions
-   - **Fix**: Flatten dependency graph; use `implementation_deps` to reduce transitives
-
-3. **Genrule overuse**: Heavy use of `genrule()` for custom logic.
-   - **Signal**: `Genrule` mnemonic with high miss rate and low CPU efficiency
-   - **Fix**: Write proper Starlark rules with declared inputs/outputs
-
-4. **Test macro explosion**: Tests that each rebuild the world.
-   - **Signal**: High `total_executions` for `bazel test` with many repeated actions
-   - **Fix**: Use shared test libraries; ensure test dependencies are narrow
-
-5. **Volatile code generation**: Generators that embed timestamps or non-deterministic output.
-   - **Signal**: High `INPUT_CHANGED` miss rate on actions downstream of a specific genrule
-   - **Fix**: Make codegen deterministic; strip timestamps; use stable sort orders
-
-### Configuration Recommendations Checklist
-
-When auditing a project's configuration, systematically verify:
-
-- [ ] `--incompatible_strict_action_env` is set
-- [ ] `--nostamp` is the default (stamping only on release builds)
-- [ ] No volatile `workspace_status_command` values propagate to non-release actions
-- [ ] All users and CI share the same `.bazelrc` flags
-- [ ] Toolchains are pinned (not using system-installed compilers)
-- [ ] External repositories are pinned to exact versions
-- [ ] `--remote_download_minimal` is enabled (reduces network transfer)
-- [ ] `--experimental_remote_cache_compression` is enabled (reduces storage transfer time)
-- [ ] `--jobs` is set appropriately for the worker fleet capacity
-- [ ] Platform properties are consistent across the team

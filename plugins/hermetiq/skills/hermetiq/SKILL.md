@@ -30,6 +30,19 @@ interpret returned data, what the numbers mean, what optimizations exist, and ho
 by impact. All analysis is based on data already collected by Hermetiq. You cannot access
 users' source code, BUILD files, or `.bazelrc` directly — infer build structure from telemetry.
 
+## Reference Files
+
+Read these only when the user's question needs deeper domain detail:
+
+- `references/REFERENCE.md` — data model, MCP tool constraints, analytics outputs, Buildbarn
+  metrics, architecture, and current build/invocation semantics.
+- `references/build-configuration.md` — configuration drift, hermeticity flags, stamping,
+  toolchain versioning, and configuration audit checklist.
+- `references/bazel-optimization.md` — common `.bazelrc` optimizations and build graph
+  anti-patterns.
+- `references/infrastructure-tuning.md` — Buildbarn storage, worker, scheduler, and scaling
+  guidance.
+
 ---
 
 ## Tool Selection Guide
@@ -64,9 +77,12 @@ Use this triage flow when the user asks a broad question:
 | "Reduce build costs" | GetRemoteActionTrends (`time_range="30d"`) | GetRemoteExecutionAnalytics, GetNamespaceCosts |
 | "Deep-dive a remote action" | FindRemoteActionGroups | FindRemoteActions, GetRemoteActionCommand |
 | "Phase timing distribution" | GetRemoteActionTrends | GetRemoteActionTiming (per mnemonic, per phase) |
-| "What filters are available?" | GetFilters or GetFilterValues | ListBuilds or ListInvocations with filters applied |
+| "What filters are available?" | GetFilters or GetFilterValues | LookupPatternsForFilters for pattern type-ahead; ListBuilds/ListInvocations with filters applied |
 | "Timeline of builds" | GetBuildTimeseriesAgg | GetInvocationTimeseriesAgg (attempt-level counts) |
 | "Which targets are trending?" | GetTargetTrends | GetTargetTrendDetail |
+| "Which actions keep failing?" | GetFailedActions | FindActions (`result_filter=ACTION_FAILED`), GetActionExecutedDetails |
+| "Which tests/actions are flaky?" | GetFlakyActions | FindActions, GetTestResults (`include_logs=true`) |
+| "How active is this project?" | GetProjectActivity | GetTrendsAgg, GetBuildHistorySummary |
 | "Audit build configuration" | ListInvocations (find candidates) | GetInvocation (`include_cmd_line=true`), GetCacheTrends, FindCacheEvents |
 
 ### Common Parameter Notes
@@ -132,6 +148,13 @@ The `mnemonic` field identifies what an action does:
 | `KotlinCompile` | Compile Kotlin | 5-60s | Yes | Similar to Javac |
 | `ProtocGenerate` | Generate protobuf code | <5s | Yes | Usually fast; many of them |
 | `Turbine*` | Java header compilation | <5s | Yes | Reduces recompilation cascades |
+
+### Execution Strategies
+
+Each action runs through one of four paths: local execution, remote execution, remote cache hit,
+or disk cache hit. Remote cache hits are usually fastest because they avoid execution. Remote
+execution adds queue, input fetch, execute, and output upload phases. Local execution trades lower
+network overhead for less cluster parallelism.
 
 ### What Makes a Build Slow?
 
@@ -263,7 +286,7 @@ environment, and command details.
 Start with GetInfraHealthSummary scoped to the build's time window. If any component shows
 `warning` or `critical`, drill into its specific tool. For detailed tuning guidance on storage
 sizing, worker concurrency, scheduler configuration, and scaling decisions, see
-`references/BUILDBARN_TUNING.md`.
+`references/infrastructure-tuning.md`.
 
 **Quick decision framework**:
 
@@ -330,8 +353,9 @@ Step-by-step workflows for common user requests.
    Which phase dominates? (Queue = infrastructure, execution = action, fetch/upload = I/O)
 5. **Check parallelism**: GetBuildParallelism → is the build achieving good concurrency?
    Low parallelism + long duration = critical path problem or worker shortage.
-6. **Compare to history**: ListBuilds (`time_range="7d"`, same
-   `command` and `pattern`, `pagination.sort_by="duration"`) → is this an outlier or regression?
+6. **Compare to history**: ListBuilds (`time_range="7d"`, same `command` and `pattern`,
+   `invocation_filter.pagination.sort_by="duration"` / `sort_order="DESC"`) → is this an
+   outlier or regression?
 7. **Check infrastructure** (if queue or fetch times are high):
    GetInfraHealthSummary scoped to this build → identify component-level issues.
 
@@ -421,22 +445,26 @@ Step-by-step workflows for common user requests.
    - For each selected invocation, call GetInvocation (`include_cmd_line=true`) to examine flags.
 2. **Check for flag drift**: Compare flags across users, branches, and CI versus local builds.
    Look for inconsistencies in `--define`, `--copt`, `--platform_suffix`, and `--action_env`.
-3. **Check hermeticity flags**: See `references/REFERENCE.md` → Build Configuration Reference
-   for the full flag audit checklist.
+3. **Check hermeticity flags**: See `references/build-configuration.md` for the full flag
+   audit checklist.
 4. **Check remote execution configuration**: Are `--jobs`, `--remote_timeout`,
    `--remote_retries` set appropriately? Compare to observed queue times and action durations.
 5. **Identify cache-fragmenting configuration**: Different flag combinations across users
    create different cache keys, reducing hit rates. Quantify via GetCacheTrends.
-6. **Deliver findings** with specific `.bazelrc` changes and expected cache improvement.
+6. **Check Bazel graph anti-patterns**: See `references/bazel-optimization.md` when the
+   telemetry points to large targets, low parallelism, or volatile code generation.
+7. **Deliver findings** with specific `.bazelrc` changes and expected cache improvement.
 
 ### Playbook: "Why did my tests fail?"
 
 1. **Get test results**: GetTestResults (`include_logs=true`) → categorize by status.
 2. **For FAILED tests**: GetActionExecutedDetails for the failed action IDs → read stderr.
+   For project-wide patterns of failing actions, use GetFailedActions (`time_range="7d"`).
 3. **For TIMEOUT tests**: Check GetRemoteExecutionAnalytics for resource contention during
    the build window. Check if worker CPU was saturated via GetWorkerFleetHealth.
-4. **For FLAKY tests**: ListInvocations for the same `target_pattern` over
-   `time_range="7d"` → correlate flakiness with infra or cache issues.
+4. **For FLAKY tests**: GetFlakyActions (`time_range="7d"`) → identify the flakiest actions
+   and targets project-wide. Then ListInvocations filtered by the same `pattern` over the
+   same window to correlate flakiness with infra or cache issues.
 5. **For REMOTE_FAILURE**: Check GetInfraHealthSummary → was infrastructure unhealthy?
 
 ### Playbook: "Investigate a build failure"
@@ -444,7 +472,8 @@ Step-by-step workflows for common user requests.
 1. **Resolve and summarize**: ResolveBuildOrInvocation for opaque IDs. Use GetBuildDetails for
    build IDs or GetInvocation for invocation IDs. Check exit_code, failure messages, and duration.
 2. **Find failing actions**: FindActions (`result_filter=ACTION_FAILED`) → identify which
-   actions failed and their mnemonics.
+   actions failed and their mnemonics. For project-wide trends of repeatedly failing actions
+   beyond a single build, use GetFailedActions (`time_range="7d"` or `"30d"`).
 3. **Get failure details**: GetActionExecutedDetails for the failed action IDs → read
    stdout/stderr and command line.
 4. **Check if remote execution issue**: GetRemoteExecutionAnalytics → were there retries,
@@ -457,47 +486,19 @@ Step-by-step workflows for common user requests.
 ## 4. Build Configuration Detection
 
 Since you cannot read users' `.bazelrc` files directly, infer build configuration from
-Hermetiq telemetry. For complete flag tables, anti-patterns, and the configuration checklist,
-see `references/REFERENCE.md` → Build Configuration Reference.
+Hermetiq telemetry.
 
-### Detecting Configuration Drift
+For detailed flag tables, drift heuristics, stamping checks, toolchain guidance, and the
+configuration checklist, read `references/build-configuration.md`. For Bazel graph
+anti-patterns and common `.bazelrc` optimization flags, read `references/bazel-optimization.md`.
 
-Configuration drift is one of the most common causes of poor cache hit rates. Different
-developers using different flags produce different action cache keys, fragmenting the cache.
-
-**How to detect drift from Hermetiq data**:
-1. **Cross-user comparison**: ListInvocations filtered by different `user` values over the
-   same `time_range`. Then inspect command lines via GetInvocation
-   (`include_cmd_line=true`) for a representative sample.
-2. **CI versus local builds**: Filter by `role` or `host` to separate CI from developer builds.
-3. **Branch-specific configuration**: Filter by `branch` to check for flag differences.
-4. **Platform fragmentation**: Check if different `--platform_suffix` values are in use.
-
-**Signals of drift**: `COMMAND_CHANGED` miss reason is significant; cache hit rates vary
-between users building the same targets; hit rates differ between CI and local builds.
-
-### Stamping Audit
-
-Stamping is the single most common configuration mistake that kills cache performance.
-
-**How to detect from Hermetiq data**:
-1. Look for `workspace_status_command` in invocation command-line arguments
-2. Check for `--stamp` flag (or absence of `--nostamp`)
-3. `INPUT_CHANGED` misses where no source code actually changed
-4. Cache miss patterns that correlate with time-of-day rather than code changes
-
-**Recommendation**: Always use `--nostamp` as the default. Only enable `--stamp` for release
-builds via a named configuration: `build:release --stamp`.
-
-### Toolchain Version Management
-
-Different toolchain versions produce different action cache keys.
-
-**Detect from data**: `COMMAND_CHANGED` miss reasons with different compiler paths; different
-`build_tool_version` values across users; cache hit rates that drop after toolchain updates.
-
-**Recommendation**: Pin all toolchains via Bazel's toolchain resolution. Use hermetic
-toolchains (downloaded by Bazel) rather than system-installed tools.
+Key signals:
+- `COMMAND_CHANGED` miss reasons, varying command lines across users/CI/branches, or different
+  `build_tool_version` values indicate configuration drift.
+- `INPUT_CHANGED` misses correlated with stamping, volatile workspace status, or generated files
+  indicate non-hermetic inputs.
+- Platform fragmentation shows up as differing `platform_name`, `cpu`, `--platform_suffix`, or
+  remote execution properties.
 
 ---
 
