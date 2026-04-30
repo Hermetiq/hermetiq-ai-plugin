@@ -143,6 +143,9 @@ Show cache miss reasons by mnemonic for my failing builds
 
 | File | Description |
 |------|-------------|
-| `SKILL.md` | Core skill with playbooks for build analysis, cache optimization, RBE tuning, and infrastructure debugging |
-| `references/REFERENCE.md` | Hermetiq data model, MCP tool inventory, and build configuration reference |
-| `references/BUILDBARN_TUNING.md` | Buildbarn infrastructure tuning guide for storage, workers, and scheduler |
+| `SKILL.md` | Core skill with MCP-aware tool selection, playbooks, and recommendation rules |
+| `references/REFERENCE.md` | Hermetiq data model, MCP tool constraints, analytics outputs, and Buildbarn architecture |
+| `references/build-configuration.md` | Configuration drift, hermeticity, stamping, toolchain, and flag audit guidance |
+| `references/bazel-optimization.md` | Common Bazel flags and build graph anti-patterns |
+| `references/infrastructure-tuning.md` | Buildbarn storage, worker, scheduler, and scaling guidance |
+| `evals/evals.json` | Basic skill behavior eval prompts |

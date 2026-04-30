@@ -10,6 +10,8 @@
   invocations with `ListInvocations`, then call `GetInvocation(include_cmd_line=true)` for each.
 - `ListBuilds`, `GetBuildHistorySummary`, and `GetBuildTimeseriesAgg` filter through
   `invocation_filter`; use `BuildAggregationOptions` to choose match and rollup semantics.
+- `GetFilters` excludes high-cardinality pattern values to keep filter loads bounded. Use
+  `LookupPatternsForFilters(project_id, query)` for project-scoped pattern type-ahead lookups.
 - Prefer stable aggregation tools (`GetRemoteExecutionAnalytics`, `GetRemoteActionTrends`) for
   transfer and timing bottlenecks before drilling into individual `FindRemoteActions` records.
 - When prompt orchestration is unavailable in a client, use direct tool-call equivalents from
@@ -37,34 +39,34 @@ workflow needs a concrete attempt, per-action data, logs, command lines, tests, 
 remote execution analytics, or parallelism data.
 
 Key fields for optimization analysis:
-- `id` — invocation_id for one attempt
-- `buildId` — logical build_id shared by related attempts when present
-- `remoteCache` / `remoteExecution` — Whether remote cache and remote execution were enabled
-- `remoteCacheEligible` — Actions that were eligible for remote caching, excludes `internalExecutions`, `localExecutions`, and `diskCacheHits`
-- `remoteCacheHits` / `remoteCacheEligible` — Quick cache hit rate: `hits / total`
-- `internalExecutions` / `localExecutions` / `remoteExecutions` — Execution strategy breakdown
-- `diskCacheHits` — Actions served from local disk cache without checking remote
-- `criticalPathLog` / `processStatsLog` — Raw critical path (the longest chain of sequential dependencies) and basic process stats logs (semi-structured text)
+- `invocation_id` — one attempt
+- `build_id` — logical build ID shared by related attempts when present
+- `remote_cache_enabled` / `remote_execution_enabled` — Whether remote cache and remote execution were enabled
+- `remote_cache_hits` / `total_executions` — Quick cache signal from the invocation summary
+- `internal_executions` / `local_executions` / `remote_executions` — Execution strategy breakdown
+- `disk_cache_hits` — Actions served from local disk cache without checking remote
+- `critical_path_log` / `process_stats_log` — Raw critical path (the longest chain of sequential dependencies) and basic process stats logs (semi-structured text)
 - `command` — Which Bazel command (build, test, run, cquery, aquery)
-- `platform` / `cpu` — Target platform (affects cache partitioning)
+- `platform_name` / `cpu` — Target platform (affects cache partitioning)
 
 ### CacheEvent
 One record per Action Cache lookup intercepted by Hermetiq's gRPC cache proxy.
 
 Key fields:
 - `hit` — Boolean; the most important field
-- `mnemonic` — Action type (CppCompile, Javac, etc.)
-- `digestHash` / `digestSize` — Content-addressed action identifier
-- `durationMicros` — Cache lookup latency
-- `missReason` — Why the lookup missed (only populated after enrichment):
+- `action_mnemonic` — Action type (CppCompile, Javac, etc.)
+- `digest_hash` / `digest_size` — Content-addressed action identifier
+- `duration_micros` — Cache lookup latency
+- `CacheMissAnalysis.reason` — Why the lookup missed when `include_miss_analysis=true`:
   - `NEVER_CACHED` — No prior cache entry exists for this action
   - `INPUT_CHANGED` — The action's input tree changed (most common)
   - `COMMAND_CHANGED` — The command line or flags changed
   - `ENV_CHANGED` — Environment variables affecting the action changed
+  - `PLATFORM_CHANGED` — Platform requirements changed
   - `CACHE_EVICTED` — Entry existed but was evicted from storage
   - `PLATFORM_SUFFIX_CHANGED` — Platform configuration drift
   - `INSTANCE_MISMATCH` — Different remote cache instance
-- `inputRootDigest` / `commandDigest` / `environmentHash` / `platformHash` — Metadata
+- `input_root_digest` / `command_digest` / `environment_hash` / `platform_hash` — Metadata
   used to determine miss reasons by comparing against previous hits
 
 ### RemoteAction
@@ -72,30 +74,30 @@ One record per action executed on a Buildbarn worker. Provides granular phase ti
 
 Key fields:
 - **Phase timestamps** (all optional, presence depends on execution path):
-  - `queuedTimestamp` → `workerStartTimestamp` = queue wait
-  - `inputFetchStartTimestamp` → `inputFetchCompletedTimestamp` = input staging
-  - `executionStartTimestamp` → `executionCompletedTimestamp` = actual work
-  - `outputUploadStartTimestamp` → `outputUploadCompletedTimestamp` = result staging
+  - `queued_at` to `worker_started_at` = queue wait
+  - `input_fetch_started_at` to `input_fetch_completed_at` = input staging
+  - `execution_started_at` to `execution_completed_at` = actual work
+  - `output_upload_started_at` to `output_upload_completed_at` = result staging
 - **Resource usage** (POSIX):
-  - `posixUserTimeNanos` / `posixSystemTimeNanos` — CPU time consumed
-  - `posixBlockInputOperations` / `posixBlockOutputOperations` — I/O operations
+  - `resource_usage.user_time_nanos` / `resource_usage.system_time_nanos` — CPU time consumed
+  - `resource_usage.block_input_operations` / `resource_usage.block_output_operations` — I/O operations
 - `cost` — Normalized execution cost for this action
-- `workerNode` / `workerPod` — Which worker handled this action
-- `cachedResult` — Whether the result came from the remote Action Cache
-- `mnemonic` / `targetId` — Action type and build target
-- `outputDigests` — Map of output file paths to content hashes
+- `worker_node` / `worker_pod` — Which worker handled this action
+- `cached_result` — Whether the result came from the remote Action Cache
+- `mnemonic` / `target_id` — Action type and build target
+- `output_file` — Output paths and digests
 
 ### BuildMetrics
 Aggregate build-level metrics reported by Bazel itself (one per invocation).
 
 Key fields:
-- `actionsCreated` / `actionsExecuted` — Total action graph size versus what ran
-- `actionCacheHits` / `actionCacheMisses` — Bazel's own local Action Cache stats
-- `analysisPhaseTimeInMs` / `executionPhaseTimeInMs` — Build phase breakdown
-- `wallTimeInMs` / `cpuTimeInMs` — Overall timing
-- `bytesSent` / `bytesRecv` — Network I/O during the build
-- Content Addressable Storage operation metrics: `casOperations`, `casOperationAvgMs`,
-  `casRemoteDownload*`, `casRemoteUpload*`
+- `actions_created` / `actions_executed` — Total action graph size versus what ran
+- `action_cache_hits` / `action_cache_misses` — Bazel's own local Action Cache stats
+- `analysis_duration` / `execution_duration` / `total_duration` — Build phase timing
+- `cpu_duration` — CPU time
+- `bytes_sent` / `bytes_received` — Network I/O during the build
+- Content Addressable Storage operation metrics: `cas_operations`, `cas_operations_avg_ms`,
+  `cas_remote_download*`, `cas_remote_upload*`
 
 ### ActionData
 Per-mnemonic aggregated action statistics (one row per mnemonic per invocation).
@@ -103,7 +105,7 @@ Per-mnemonic aggregated action statistics (one row per mnemonic per invocation).
 Key fields:
 - `mnemonic` — Action type
 - `executed` / `created` — How many ran versus were in the graph
-- `firstStartedMs` / `lastEndedMs` — Temporal span of this mnemonic's executions
+- `first_started_ms` / `last_ended_ms` — Temporal span of this mnemonic's executions
 
 ---
 
@@ -123,43 +125,43 @@ Key fields:
   - `ALL_INVOCATIONS_IN_SELECTED_BUILDS` — rollups include every invocation for selected builds.
 
 ### CacheEventAgg (per-invocation)
-- `total`, `hits`, `misses`, `hit_rate`
+- `total_actions`, `hit_count`, `miss_count`, `hit_rate`
 - `by_mnemonic` — Per-action-type breakdown
 - `by_instance` — Per-cache-instance breakdown
 - `top_miss_targets` — Targets with most misses
 - `slowest_actions` — Highest cache lookup latency
-- `miss_reason` breakdown — Count per reason category
+- `by_miss_reason` — Count per reason category
 
 ### CacheTrends (cross-build, time-windowed)
 - `summary` — Total lookups, hit rate, average latency over the period
-- `daily_buckets` — Per-day hit rates and lookup volumes
-- `miss_reason_breakdown` — How miss reasons distribute over time
-- `mnemonic_heatmap` — Mnemonic × day hit rate grid
+- `buckets` — Per-day hit rates and lookup volumes
+- `buckets.miss_reasons` — How miss reasons distribute over time
+- `mnemonic_day_heatmap` — Mnemonic × day hit rate grid
 - `top_miss_targets` — Targets with most misses over the period
 
 ### RemoteExecutionAnalytics (per-invocation)
 - `total_cost`, `total_actions`, `total_execution_seconds`
 - `unique_workers`, `unique_mnemonics`, `avg_parallelism`
-- `build_phase_stats` — Per-mnemonic phase breakdown (queue/fetch/execute/upload)
-- `slow_actions` — Top N by execution time
+- `stats` — Per-mnemonic phase breakdown (queue/fetch/execute/upload)
+- `slowest_actions` — Top N by execution time
 - `expensive_targets` — Top N by total cost
 - `queue_wait_stats` — Per-mnemonic 50th/95th/99th percentile and max queue wait
 - `io_hotspots` — Actions with highest block I/O
-- `worker_stats` — Per-worker action count and cost
+- `workers` — Per-worker action count and cost
 - `cpu_efficiency_stats` — Per-mnemonic CPU utilization percentage
 - `cache_miss_candidates` — Actions executed multiple times (same digest)
-- `cache_hit_analysis` — Unique digests, repeated actions, potential savings
+- `cache_summary` — Unique digests, repeated actions, potential savings
 
 ### RemoteActionTrends (cross-build, time-windowed)
 - `summary` — Totals and period-over-period percentage changes for:
   wall_time, action_count, cost, cpu_time, build_count
-- `daily_buckets` — Action counts, costs, timing per day
-- `mnemonic_counts` — Distribution of action types
+- `buckets` — Action counts, costs, timing per day
+- `mnemonics` — Distribution of action types
 - `phase_breakdown` — Per-mnemonic average timing per phase
 - `slowest_actions` — Top 50 across all builds
 - `expensive_targets` — Top 50 across all builds
 - `io_hotspots` — Top 50 by block I/O
-- `cpu_efficiency_by_mnemonic` — Utilization percentage, user/system ratio, I/O-bound count
+- `cpu_efficiency` — Utilization percentage, user/system ratio, I/O-bound count
 - `fleet_utilization` — Daily unique workers, churn (new versus returning), average actions/worker
 
 ### TargetTrends (cross-build, time-windowed)
@@ -170,6 +172,27 @@ Key fields:
 - `GetTargetTrendDetail` — daily duration buckets and recent invocations for one target row.
 - Use this when build duration or failures appear concentrated in a few targets, or when users
   ask which targets are getting slower over time.
+
+### Project-Level Action and Activity Tools
+
+These all take a `TrendsAggregatedRequest` (`project_id`, `time_range`, optional `filters` as a
+`ListInvocationsRequest`) and return project-scoped rollups. `time_range` accepts `"7d"`, `"15d"`,
+or `"30d"`.
+
+- `GetProjectActivity` — high-level project activity counts and trends. Use for "how active is
+  this project?" overview cards and for sanity-checking whether a project is still in use before
+  recommending optimizations.
+- `GetFailedActions` — top failed actions, daily failure counts, failure-detail breakdown,
+  failure novelty, and aborted reasons. Use for project-wide failure pattern analysis when a
+  single-build view (`FindActions(result_filter=ACTION_FAILED)`) is insufficient.
+- `GetFlakyActions` — flakiest actions across the project. Loaded asynchronously by dashboards
+  because the analysis is more expensive than the standard failure rollup. Use for the FLAKY
+  bucket in test-failure investigations.
+
+### Pattern Type-Ahead
+
+- `LookupPatternsForFilters(project_id, query)` returns a bounded subset of Bazel patterns for
+  type-ahead UIs. `GetFilters` intentionally excludes patterns due to their cardinality.
 
 ---
 
@@ -484,91 +507,3 @@ Hermetiq creates 50+ recording rules for Buildbarn metrics:
 - `bb:grpc_server_msg_sent_total` / `bb:grpc_server_msg_received_total` — Message rates
 
 ---
-
-## Build Configuration Reference
-
-### Hermeticity Flag Audit
-
-When cache hit rates are poor, verify these flags from invocation data. If a flag is missing,
-recommend adding it to the project's shared `.bazelrc`:
-
-| Flag | Purpose | How to Detect Absence |
-|------|---------|----------------------|
-| `--incompatible_strict_action_env` | Prevents environment variable leakage into actions | `ENV_CHANGED` miss reasons; different cache keys for identical code across machines |
-| `--nostamp` | Disables volatile timestamp/git-SHA embedding | `INPUT_CHANGED` misses on stamped targets; volatile workspace_status in command line |
-| `--noexperimental_check_external_repository_files` | Avoids unnecessary re-fetching of external repos | Slow analysis phase; cache misses after repo fetch |
-| `--experimental_remote_cache_compression` | Compresses Content Addressable Storage transfers | High input fetch and output upload times with moderate blob sizes |
-| `--remote_download_minimal` | Only downloads outputs needed locally (builds without the bytes) | High bytes received in BuildMetrics; long output download phases |
-
-### Remote Execution Flag Tuning
-
-These flags affect remote execution performance. Recommend values based on observed metrics:
-
-| Flag | What It Controls | How to Tune from Data |
-|------|-----------------|----------------------|
-| `--jobs=<N>` | Maximum concurrent actions | Compare to GetBuildParallelism peak. If parallelism plateaus below `--jobs`, the build graph is the bottleneck, not the job limit. If it hits `--jobs` consistently, increase it. Default for remote execution is 200. |
-| `--remote_timeout=<seconds>` | Per-action timeout for remote execution | Check slowest actions in GetRemoteExecutionAnalytics. Set to 2-3x the slowest expected action. Default 3600s (1 hour) is usually sufficient. |
-| `--remote_retries=<N>` | Retry count for transient remote failures | Check action failure rates in GetGrpcHealth. If transient errors are common, increase from default 5. If errors are deterministic, retries waste time. |
-| `--remote_default_exec_properties` | Default platform properties for remote actions | Check GetSchedulerQueueHealth per-platform breakdown. Ensure these match the worker platforms that have capacity. |
-
-### Common `.bazelrc` Optimizations
-
-**Cache hermeticity flags**:
-- `build --incompatible_strict_action_env` — Prevents environment variable leakage
-- `build --noexperimental_check_external_repository_files` — Avoids re-fetching external repos
-- `build --experimental_repository_cache_hardlinks` — Reduces disk usage for external repos
-
-**Remote execution tuning**:
-- `build --remote_timeout=3600` — Prevent timeouts on long-running actions
-- `build --remote_retries=5` — Retry transient failures
-- `build --jobs=<N>` — Control parallelism (default is 200 for remote; adjust based on data)
-- `build --experimental_remote_cache_compression` — Compress storage transfers (reduces I/O time)
-- `build --remote_download_minimal` — Only download outputs needed locally (builds without the bytes)
-- `build --noremote_upload_local_results` — Do not push local execution results to remote cache
-
-**Stamping (common cache killer)**:
-- `build --nostamp` — Disable stamping globally (biggest quick-win for many projects)
-- `build:release --stamp` — Only enable stamping for release builds
-
-**Platform configuration**:
-- `build --remote_default_exec_properties=OSFamily=Linux` — Ensure consistent platform matching
-- Use platform mappings to control which actions run remotely versus locally
-
-### Build Graph Anti-Patterns
-
-When you see these in Hermetiq data, recommend specific fixes:
-
-1. **Mega-target**: A single target with hundreds of source files.
-   - **Signal**: One target appears repeatedly in `expensive_targets` with high action count
-   - **Fix**: Split into smaller libraries with narrower visibility
-
-2. **Deep dependency chain**: Long sequential chains of actions.
-   - **Signal**: Low parallelism in GetBuildParallelism despite many total actions
-   - **Fix**: Flatten dependency graph; use `implementation_deps` to reduce transitives
-
-3. **Genrule overuse**: Heavy use of `genrule()` for custom logic.
-   - **Signal**: `Genrule` mnemonic with high miss rate and low CPU efficiency
-   - **Fix**: Write proper Starlark rules with declared inputs/outputs
-
-4. **Test macro explosion**: Tests that each rebuild the world.
-   - **Signal**: High `total_executions` for `bazel test` with many repeated actions
-   - **Fix**: Use shared test libraries; ensure test dependencies are narrow
-
-5. **Volatile code generation**: Generators that embed timestamps or non-deterministic output.
-   - **Signal**: High `INPUT_CHANGED` miss rate on actions downstream of a specific genrule
-   - **Fix**: Make codegen deterministic; strip timestamps; use stable sort orders
-
-### Configuration Recommendations Checklist
-
-When auditing a project's configuration, systematically verify:
-
-- [ ] `--incompatible_strict_action_env` is set
-- [ ] `--nostamp` is the default (stamping only on release builds)
-- [ ] No volatile `workspace_status_command` values propagate to non-release actions
-- [ ] All users and CI share the same `.bazelrc` flags
-- [ ] Toolchains are pinned (not using system-installed compilers)
-- [ ] External repositories are pinned to exact versions
-- [ ] `--remote_download_minimal` is enabled (reduces network transfer)
-- [ ] `--experimental_remote_cache_compression` is enabled (reduces storage transfer time)
-- [ ] `--jobs` is set appropriately for the worker fleet capacity
-- [ ] Platform properties are consistent across the team
