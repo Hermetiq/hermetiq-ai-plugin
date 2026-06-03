@@ -14,7 +14,7 @@
   "mcpServers": {
     "hermetiq": {
       "type": "http",
-      "url": "https://mcp.cloud-usc1.hermetiq.io"
+      "url": "${HERMETIQ_MCP_URL:-https://mcp.cloud-usc1.hermetiq.io}"
     }
   }
 }

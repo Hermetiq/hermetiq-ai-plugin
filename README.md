@@ -33,9 +33,19 @@ The plugin configures the MCP server automatically. On first use you'll authenti
 
 Authentication uses OAuth2 Dynamic Client Registration via [Stytch](https://stytch.com/docs/connected-apps/guides/remote-mcp-servers). If you hit auth errors, re-authenticate with `/mcp` and follow the prompts.
 
+### Self-hosted / on-prem
+
+The plugin defaults to Hermetiq Cloud (`https://mcp.cloud-usc1.hermetiq.io`). If you run Hermetiq in your own infrastructure, set `HERMETIQ_MCP_URL` to your deployment's MCP endpoint before launching Claude Code:
+
+```bash
+export HERMETIQ_MCP_URL=https://mcp.hermetiq.your-domain.example
+```
+
+The plugin picks this up automatically; no edits to `plugin.json` are needed.
+
 ### Manual MCP server setup
 
-To configure the MCP server without the plugin, add this to your Claude Code MCP settings:
+To configure the MCP server without the plugin, add this to your Claude Code MCP settings (swap the URL for your on-prem endpoint if applicable):
 
 ```json
 {
@@ -76,6 +86,8 @@ Go to **Settings > Connectors** and add:
 https://mcp.cloud-usc1.hermetiq.io
 ```
 
+> Self-hosted? Use your on-prem MCP endpoint instead (e.g. `https://mcp.hermetiq.your-domain.example`).
+
 ### 2. Package and upload the skill
 
 ```bash
@@ -105,6 +117,8 @@ Go to **Settings > Capabilities** and toggle on **Code execution and file creati
 ```bash
 codex mcp add hermetiq --url https://mcp.cloud-usc1.hermetiq.io
 ```
+
+> Self-hosted? Replace the URL with your on-prem MCP endpoint (e.g. `https://mcp.hermetiq.your-domain.example`).
 
 Verify with `codex mcp list` or `codex mcp get hermetiq`.
 

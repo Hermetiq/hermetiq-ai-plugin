@@ -5,10 +5,10 @@ description: >
   investigate slow or failed builds, cache misses, cache hit rate regressions,
   remote execution timing, Buildbarn infrastructure health, worker fleet sizing,
   build cost, flaky or failed tests, target/action trends, build configuration
-  drift, or comparisons across time periods. Interprets Hermetiq MCP telemetry
-  and proto-backed analytics with Bazel, remote cache, remote execution, and
+  drift, profile-derived invocation insights, Bazel JSON profile trends, or
+  comparisons across time periods. Interprets Hermetiq MCP telemetry and
+  proto-backed analytics with Bazel, remote cache, remote execution, and
   Buildbarn domain knowledge.
-argument-hint: "[build-id or invocation-id], question, or optimization goal"
 ---
 
 # Hermetiq Bazel Build Optimizer
@@ -52,9 +52,10 @@ Additional non-query tools:
   `ListBuildbarnServiceConfigMessages`.
 
 Available prompts include `select_project`, `debug_cache_misses`, `analyze_build`,
-`investigate_failure`, `test_failures`, `project_health`, `cost_analysis`,
-`find_slow_builds`, `weekly_trends_report`, `cache_trends`, `rbe_trends`,
-`rbe_optimization`, `compare_periods`, `infra_health`, and
+`invocation_insights`, `investigate_failure`, `test_failures`, `project_health`,
+`cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
+`profile_trends`, `rbe_trends`, `rbe_optimization`, `compare_periods`,
+`infra_health`, and
 `setup_hermetiq_bazel`. Use a prompt when it matches the user's intent; otherwise
 call the tools directly.
 
@@ -79,7 +80,16 @@ Kubernetes access. Proto-intel tools/resources require proto-intel to be enabled
 - Use `invocation_id` with attempt-level tools: `GetInvocation`,
   `GetCacheEventAgg`, `FindCacheEventGroups`, `FindCacheEvents`,
   `GetRemoteExecutionAnalytics`, `FindActions`, `GetActionExecutedDetails`,
-  `GetTargets`, `GetTestResults`, and `GetBuildParallelism`.
+  `GetTargets`, `GetTestResults`, `GetBuildParallelism`, and
+  `GetInvocationInsights`.
+- Use `GetInvocationInsights(invocation_id=...)` for the curated "what should I
+  change?" list for one invocation. `GetInvocation` also surfaces profile
+  insights under `invocation.profile_metrics.insights`; call the dedicated RPC
+  when you only need the current typed recommendation schema.
+- Use `GetProfileTrends` for cross-build Bazel JSON trace profile analysis:
+  phase bottlenecks, bottleneck movement, client resource pressure, action
+  parallelism, GC pressure, Skymeld/config drift, and profile-derived
+  diagnostics.
 
 ## Common Parameters
 
@@ -105,11 +115,13 @@ Kubernetes access. Proto-intel tools/resources require proto-intel to be enabled
 
 | User intent | Start with | Drill down with |
 |-------------|------------|-----------------|
-| Slow build | `ResolveBuildOrInvocation`, `GetBuildDetails` or `GetInvocation` | `GetCacheEventAgg`, `GetRemoteExecutionAnalytics`, `GetBuildParallelism` |
+| What should I fix in this invocation? | `ResolveBuildOrInvocation`, `GetInvocationInsights` | Validate `affected_items` with `FindActions`, `FindCacheEvents`, `GetRemoteExecutionAnalytics`, `GetBuildParallelism` |
+| Slow build | `ResolveBuildOrInvocation`, `GetBuildDetails` or `GetInvocation` | `GetInvocationInsights`, `GetCacheEventAgg`, `GetRemoteExecutionAnalytics`, `GetBuildParallelism` |
 | Cache misses | `GetCacheEventAgg` | `FindCacheEventGroups`, `FindCacheEvents(include_miss_analysis=true)` |
 | Failed build | `ResolveBuildOrInvocation`, `GetBuildDetails` or `GetInvocation` | `FindActions(result_filter=ACTION_FAILED)`, `GetActionExecutedDetails` |
 | Failed or flaky tests | `GetTestResults(include_logs=true)` | `GetTestTrends`, `GetTestTiming`, `GetFailedActions`, `GetFlakyActions` |
-| Build trends | `show_trends_dashboard`, `GetBuildHistorySummary`, or `GetTrendsAgg` | `GetBuildTimeseriesAgg`, `GetCacheTrends`, `GetRemoteActionTrends` |
+| Build trends | `show_trends_dashboard`, `GetBuildHistorySummary`, or `GetTrendsAgg` | `GetBuildTimeseriesAgg`, `GetCacheTrends`, `GetProfileTrends`, `GetRemoteActionTrends` |
+| Profile trends or "where did time go?" | `GetProfileTrends(time_range="7d")` | `GetCriticalPathTrends`, `GetRemoteActionTrends`, `GetCacheTrends`, infra tools only when profile metrics point there |
 | Time-period comparison | `GetTrendsAgg` | `GetRemoteActionTrends`, `GetCacheTrends`, `GetTargetTrends` |
 | Infrastructure bottleneck | `GetInfraHealthSummary` | `GetSchedulerQueueHealth`, `GetStorageHealth`, `GetWorkerFleetHealth`, `GetGrpcHealth` |
 | Cost reduction | `GetRemoteActionTrends(time_range="30d")` | `GetRemoteExecutionAnalytics`, `GetNamespaceCosts`, `GetCostSummary` |
@@ -129,12 +141,58 @@ For cache, remote action, and target analysis, start grouped, then drill down:
 
 Work in this order unless the user's question is narrower:
 
-1. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
-2. Critical path and parallelism: long sequential chains limit speedup.
-3. Queue wait: worker pool or scheduler saturation.
-4. Input fetch/output upload: large trees, large outputs, or storage contention.
-5. Slow actions: action outliers, low CPU efficiency, memory or I/O pressure.
-6. Infrastructure: Buildbarn scheduler, workers, storage, gRPC, and pod events.
+1. Invocation insights: if analyzing one invocation, call `GetInvocationInsights`
+   and use it as the index of candidate fixes.
+2. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
+3. Critical path and parallelism: long sequential chains limit speedup.
+4. Queue wait: worker pool or scheduler saturation.
+5. Input fetch/output upload: large trees, large outputs, or storage contention.
+6. Slow actions: action outliers, low CPU efficiency, memory or I/O pressure.
+7. Infrastructure: Buildbarn scheduler, workers, storage, gRPC, and pod events.
+
+### Invocation Insights and Profile Metrics
+
+Use `GetInvocationInsights` when the user asks what to change, how to make one
+build faster, or whether there is low-hanging fruit. Each insight includes:
+`insight_id`, `pillar`, `title`, `summary`, `recommendation`,
+`estimated_savings`, `caveats`, and typed `affected_items` for actions, targets,
+mnemonics, phases, or flags.
+
+- Rank by `estimated_savings.percent_of_wall_time` when present. If there is no
+  numeric estimate, keep the insight but label the impact qualitative.
+- Group by pillar: `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, and
+  `PROFILE_QUALITY`.
+- Surface caveats. They are part of the server-side confidence model.
+- Validate the top insights before presenting them as findings. Use
+  `affected_items` to call the smallest corroborating tool: `FindActions` for
+  action/target pointers, `FindCacheEvents(include_miss_analysis=true)` for cache
+  pointers, `GetRemoteExecutionAnalytics` for remote phase timing, and
+  `GetBuildParallelism` for concurrency or critical-path claims.
+- Do not recommend a flag that the user already set. The insight rule layer
+  suppresses those, and `GetInvocation(include_cmd_line=true)` can verify the
+  command line when needed.
+
+Use `GetProfileTrends` for project or time-window questions about Bazel JSON
+trace profiles. Default to `time_range="7d"` unless the user asks otherwise.
+Supported dashboard windows include `"3d"`, `"7d"`, `"15d"`, and `"30d"`.
+Leave `force_raw=false` for broad dashboards so hourly rollups can be used; set
+`force_raw=true` only for narrow exact/debug reads. Always cite
+`builds_with_profile / total_builds` as profile coverage, and mention
+`used_rollups` when exactness matters.
+
+Interpret profile bottleneck labels as follows:
+
+| Bottleneck | Meaning | First action |
+|------------|---------|--------------|
+| `process_bound` | Remote worker time is dominated by running the action command itself, such as compile, link, test, or tool execution. It is not primarily queue, cache lookup, input fetch, upload, or output download time. | Inspect the affected critical-path actions and mnemonics; split large targets, shard long tests, tune compiler/linker/test flags, improve persistent workers, or use larger workers only when resource metrics show CPU or memory saturation. Adding more workers usually will not shorten one serial long action. |
+| `analysis_bound` | Bazel analysis or loading consumes a large share before useful action execution. | Trim target patterns, reduce macro/rule analysis work, avoid broad dependencies, and investigate rule implementations or repository setup. |
+| `queue_bound` | Actions spend significant time waiting for remote workers or scheduler capacity. | Check `GetRemoteExecutionAnalytics.queue_wait_stats` and `GetSchedulerQueueHealth`; scale or rebalance workers by platform. |
+| `fetch_bound` | Workers spend significant time fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker file-cache locality or virtual filesystem/prefetching, and check `GetStorageHealth`. |
+| `upload_bound` | Workers spend significant time uploading outputs. | Shrink generated outputs, remove unnecessary outputs, and check storage upload latency. |
+| `output_download_bound` | Bazel client wall time is dominated by downloading remote outputs. | Prefer `--remote_download_outputs=toplevel` or `minimal` where compatible and reduce top-level output volume. |
+| `cache_check_bound` | Remote cache checks, Merkle tree work, or missing-digest lookups are a major share. | Drill into cache and storage latency with `GetCacheEventAgg`, `FindCacheEvents`, and `GetStorageHealth`. |
+| `client_resource_bound` | Local Bazel client memory, host load, or JVM GC pressure is constraining the build. | Check resource and GC fields in `profile_metrics`; increase client resources, tune Bazel JVM settings, and reduce analysis breadth. |
+| `unknown` or empty | The profile is missing, incomplete, or does not contain a dominant classifier signal. | Treat profile-derived conclusions as low confidence and fall back to cache, remote execution, critical path, and infrastructure tools. |
 
 ### Cache Effectiveness
 
@@ -233,13 +291,16 @@ Only calculate savings when required inputs are present, such as `miss_count`,
 
 1. Resolve the ID and summarize duration, status, attempts, command, platform, cache,
    and remote execution flags.
-2. Check `GetCacheEventAgg`. If hit rate is below 80%, cache misses are likely a
+2. Call `GetInvocationInsights` for the invocation attempt. Rank the top insights
+   by estimated savings, preserve caveats, and use `affected_items` to choose the
+   next validation tool.
+3. Check `GetCacheEventAgg`. If hit rate is below 80%, cache misses are likely a
    primary bottleneck.
-3. Check `GetRemoteExecutionAnalytics` phase totals and outliers.
-4. Check `GetBuildParallelism` for concurrency and critical path shape.
-5. Compare history with `ListBuilds`, `GetBuildTimeseriesAgg`, `GetTrendsAgg`,
-   `GetCacheTrends`, and `GetRemoteActionTrends`.
-6. If queue, fetch, upload, or infra errors are elevated, run the infrastructure flow.
+4. Check `GetRemoteExecutionAnalytics` phase totals and outliers.
+5. Check `GetBuildParallelism` for concurrency and critical path shape.
+6. Compare history with `ListBuilds`, `GetBuildTimeseriesAgg`, `GetTrendsAgg`,
+   `GetProfileTrends`, `GetCacheTrends`, and `GetRemoteActionTrends`.
+7. If queue, fetch, upload, or infra errors are elevated, run the infrastructure flow.
 
 ### Cache Hit Rate Improvement
 
