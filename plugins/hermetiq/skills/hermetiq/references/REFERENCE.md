@@ -10,6 +10,12 @@
   invocations with `ListInvocations`, then call `GetInvocation(include_cmd_line=true)` for each.
 - `ListBuilds`, `GetBuildHistorySummary`, and `GetBuildTimeseriesAgg` filter through
   `invocation_filter`; use `BuildAggregationOptions` to choose match and rollup semantics.
+- `GetInvocationInsights` is invocation-scoped. It exposes the current typed recommendation
+  schema for the same profile-derived action-plan surface that `GetInvocation` also surfaces
+  under `invocation.profile_metrics.insights`, without loading the full invocation payload.
+- `GetProfileTrends` is project/time-window scoped. Use `time_range` (`"3d"`, `"7d"`, `"15d"`,
+  or `"30d"`) and low-cardinality filters. Leave `force_raw=false` for broad dashboards; use
+  `force_raw=true` only for narrow exact/debug reads.
 - `GetFilters` excludes high-cardinality pattern values to keep filter loads bounded. Use
   `LookupPatternsForFilters(project_id, query)` for project-scoped pattern type-ahead lookups.
 - Prefer stable aggregation tools (`GetRemoteExecutionAnalytics`, `GetRemoteActionTrends`) for
@@ -46,6 +52,9 @@ Key fields for optimization analysis:
 - `internal_executions` / `local_executions` / `remote_executions` — Execution strategy breakdown
 - `disk_cache_hits` — Actions served from local disk cache without checking remote
 - `critical_path_log` / `process_stats_log` — Raw critical path (the longest chain of sequential dependencies) and basic process stats logs (semi-structured text)
+- `profile_metrics` — Parsed Bazel JSON trace profile summary, including wall-time anatomy,
+  remote phase totals, bottleneck classification, action parallelism, resource pressure, and
+  profile-derived insights
 - `command` — Which Bazel command (build, test, run, cquery, aquery)
 - `platform_name` / `cpu` — Target platform (affects cache partitioning)
 
@@ -106,6 +115,67 @@ Key fields:
 - `mnemonic` — Action type
 - `executed` / `created` — How many ran versus were in the graph
 - `first_started_ms` / `last_ended_ms` — Temporal span of this mnemonic's executions
+
+### InvocationProfileMetrics and Profile Insights
+Parsed Bazel JSON trace profile summary for one invocation. It lets agents explain where time
+went without reconstructing a profile from raw trace events.
+
+Key fields:
+- `build_wall_time_micros`, `analysis_phase_micros`, `execution_phase_micros` — wall-time
+  anatomy for the invocation.
+- Remote phase totals: `remote_queue_micros`, `remote_fetch_micros`,
+  `remote_process_micros`, `remote_upload_micros`, `remote_output_download_micros`, and
+  `remote_cache_check_micros`.
+- `merkle_micros` / `find_missing_digests_micros` — local/client-side work before remote cache
+  or execution requests.
+- `critical_path_micros`, `critical_path_component_count`, `critical_path_execution_ratio`,
+  and `critical_path_queue_micros` — critical-path shape and whether the slow path is queue or
+  execution heavy.
+- `bottleneck_kind` / `bottleneck_ratio` — server-classified dominant bottleneck and share.
+- `effective_parallelism` — action work divided by build wall time; use with
+  `GetBuildParallelism` to distinguish low graph parallelism from worker capacity limits.
+- `gc_count`, `gc_total_micros`, `gc_max_micros`, plus `resource_metrics` — client resource
+  pressure signals.
+- `timeline_segments`, `timeline_events`, `phase_metrics`, `remote_phase_metrics`,
+  `mnemonic_metrics`, and `hotspot_metrics` — profile-derived timeline and hotspot detail.
+- `insights` — older embedded `ProfileInsight` records for single-invocation recommendations.
+  Prefer `GetInvocationInsights` for the current typed insight schema when only the action plan
+  is needed.
+
+`GetInvocationInsights` returns typed `Insight` records:
+- `insight_id` — stable key for dedupe and per-rule links.
+- `pillar` — `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, or `PROFILE_QUALITY`.
+- `title`, `summary`, `recommendation` — user-facing copy.
+- `estimated_savings.percent_of_wall_time`, `estimated_savings.micros`,
+  `estimated_savings.human_readable` — rough savings projection; percent is the ranking key.
+- `caveats` — uncertainty notes that must be surfaced with the recommendation.
+- `affected_items` — typed pointers (`ACTION`, `TARGET`, `MNEMONIC`, `PHASE`, `FLAG`) with an
+  optional metric label and duration. Use these to choose drill-down calls.
+
+Insight workflow:
+1. Resolve the user's ID; if it is a build ID, choose the primary/latest invocation attempt from
+   `GetBuildDetails`.
+2. Call `GetInvocationInsights(invocation_id=...)`.
+3. Rank by `estimated_savings.percent_of_wall_time`, keeping qualitative insights when no
+   numeric savings are available.
+4. Validate the top insights with the smallest underlying tool call: `FindActions`,
+   `FindCacheEvents(include_miss_analysis=true)`, `GetRemoteExecutionAnalytics`, or
+   `GetBuildParallelism`.
+5. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
+
+Profile bottleneck glossary:
+
+| `bottleneck_kind` | Definition | Actionable follow-up |
+|-------------------|------------|----------------------|
+| `process_bound` | Remote worker time is mostly spent running the action process itself. In Bazel terms, the command inside the sandbox, such as compiler, linker, test runner, or codegen tool, is the long pole rather than queueing, input fetch, cache checks, uploads, or output download. | Inspect related actions and mnemonics; split large targets, shard long tests, improve persistent workers, tune compiler/linker/test flags, or use larger workers only when resource signals show CPU or memory saturation. More workers usually will not shorten one serial action. |
+| `analysis_bound` | Bazel loading/analysis dominates before action execution. | Trim broad target patterns, reduce macro/rule analysis work, simplify dependency fanout, and investigate expensive repository or rule setup. |
+| `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `GetRemoteExecutionAnalytics.queue_wait_stats` and `GetSchedulerQueueHealth`; scale or rebalance workers for the affected platform. |
+| `fetch_bound` | Workers spend a large share fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker cache locality or virtual filesystem/prefetching, and check storage latency. |
+| `upload_bound` | Workers spend a large share uploading outputs. | Shrink outputs, avoid unnecessary declared outputs, and check storage upload health. |
+| `output_download_bound` | The Bazel client spends too much wall time downloading remote outputs. | Prefer `--remote_download_outputs=toplevel` or `minimal` where compatible and reduce top-level output volume. |
+| `cache_check_bound` | Action Cache checks, Merkle tree construction, or missing-digest lookups consume a large share. | Check cache hit/miss data and storage latency with `GetCacheEventAgg`, `FindCacheEvents`, and `GetStorageHealth`. |
+| `client_resource_bound` | Bazel client host load, memory, or JVM garbage collection pressure limits progress. | Use profile resource and GC metrics; increase client resources, tune Bazel JVM settings, or reduce analysis breadth. |
+| `unknown` or empty | Profile data is missing, incomplete, or does not have a clear dominant signal. | Treat profile-derived conclusions as low confidence and fall back to cache, remote execution, critical path, and infrastructure tools. |
 
 ---
 
@@ -172,6 +242,45 @@ Key fields:
 - `GetTargetTrendDetail` — daily duration buckets and recent invocations for one target row.
 - Use this when build duration or failures appear concentrated in a few targets, or when users
   ask which targets are getting slower over time.
+
+### ProfileTrends (cross-build, time-windowed)
+Use `GetProfileTrends` for Bazel JSON trace profile questions across a project or filtered build
+set. The request supports `time_range`, `pattern`, `repository`, `branch`, `command`, `user`,
+`tags`, `role`, `platform_name`, `host`, `build_user`, `status`, and `force_raw`.
+
+Response fields:
+- `summary.total_builds` / `summary.builds_with_profile` — profile coverage. Low coverage means
+  profile conclusions are conditional.
+- `summary.avg_build_wall_time_micros`, `avg_analysis_wall_micros`,
+  `avg_execution_wall_micros`, and `avg_action_total_micros` — build time anatomy and effective
+  action parallelism.
+- `summary.remote_queue_micros_sum`, `remote_fetch_micros_sum`,
+  `remote_process_micros_sum`, `remote_upload_micros_sum`,
+  `remote_output_download_micros_sum`, and `remote_cache_check_micros_sum` — remote phase mix.
+- `summary.top_bottleneck_kind` / `summary.top_bottleneck_share` — dominant profile bottleneck
+  classification over the selected window.
+- `summary.avg_peak_memory_mb`, `avg_peak_load`, `avg_gc_total_micros`, and
+  `major_gc_build_count` — client resource and Bazel JVM health.
+- `summary.skymeld_build_count`, `summary.skymeld_share`, and
+  `bazel_version_distribution` — build configuration drift and Skymeld adoption signals.
+- `buckets` — daily time series for charting build anatomy, remote phase mix, bottleneck movement,
+  memory, GC, and Skymeld adoption.
+- `phase_trends`, `bottleneck_trends`, `resource_trends`, and `mnemonic_trends` — bounded
+  low-cardinality profile rollups. Use mnemonic trends to identify action classes, not individual
+  targets.
+- `diagnostics` — precomputed MCP-friendly findings. Cite the diagnostic, then verify the
+  recommendation against summary/trend metrics or a focused drill-down tool.
+- `used_rollups` — whether the server used scalable hourly rollups. Prefer rollups for broad
+  dashboards; use `force_raw=true` only for narrow exact/debug reads.
+
+Profile trend workflow:
+1. Call `GetProfileTrends(time_range="7d")` unless the user chooses another window.
+2. Report profile coverage and whether rollups were used.
+3. Explain the dominant bottleneck using `top_bottleneck_kind`, phase sums, and resource trends.
+4. Drill down only where the profile points: queue -> infrastructure/remote execution, process ->
+   actions and critical path, analysis -> Bazel/rule graph, cache-check -> cache/storage.
+5. Pair with `GetCriticalPathTrends`, `GetRemoteActionTrends`, `GetCacheTrends`, or
+   infrastructure tools only when those tools test a specific profile-derived hypothesis.
 
 ### Project-Level Action and Activity Tools
 
