@@ -1,45 +1,82 @@
 # Buildbarn Infrastructure Tuning Reference
 
-Use GetBuildbarnConfig to read the live jsonnet configuration, then correlate with metrics
-from the infrastructure tools to identify tuning opportunities.
+Use `AnalyzeBuildbarnStorage` or `GetBuildbarnConfig` when available to read live
+configuration, then correlate with metrics from the infrastructure tools to identify tuning
+opportunities. If neither live config tool is present, ask the operator for the relevant
+Jsonnet/ConfigMap content before making config-specific recommendations.
 
 ---
 
 ## Storage Tuning
 
+Prefer `AnalyzeBuildbarnStorage` when it is registered (requires Kubernetes access): it
+evaluates the live storage/frontend jsonnet, validates it against the bb-storage schema,
+derives block geometry and key-location-map facts, and returns rule-based findings with
+severities. If it is absent, use `GetBuildbarnConfig` only when that tool is also present
+in tools/list; otherwise ask the operator for the storage/frontend/common ConfigMap Jsonnet
+or use ConfigSets tools when present, and label the result as config-supplied rather than
+live-cluster verified. The underlying model lives in the MCP resource
+`buildbarn://guides/storage-model`.
+
 ### Content Addressable Storage Sizing
 
 Buildbarn's local storage backend writes blobs into a large file or raw block device divided
-into **blocks** that rotate through roles: old → current → new. A cuckoo hash table indexes
-blob locations.
+into **blocks** that rotate through roles: old → current → new. The block is the unit of
+eviction — when the oldest new block fills, the ranges rotate and the oldest old block is
+discarded whole. A fixed-size open-addressed hash table (the **key-location map**) indexes
+blob locations and never grows.
+
+**GetStorageHealth response shape** (pass `storage_type: 'cas'` or `'ac'` to filter):
+`cas`/`ac` each carry `operations_per_sec{}`, `latency_ms{Get_p90_ms, Put_p90_ms,
+FindMissing_p90_ms}`, `error_rate_pct` (NotFound/Canceled/AlreadyExists excluded — a cache
+miss is not an error), and `blob_size_bytes` percentiles (Content Addressable Storage only);
+`disk_health{eviction_age_hours, by_shard[]}`; `hash_table{get_too_many_attempts_rate,
+put_too_many_iterations_rate, put_ignored_invalid_rate}`; `eviction[]`; `assessment`.
 
 **How to assess if storage is undersized**:
-1. GetStorageHealth: `eviction_age` — how long blobs survive before being overwritten.
-   If eviction age < 7 days, the cache is under pressure.
+1. GetStorageHealth: `disk_health.eviction_age_hours` — the age of the youngest data ever
+   evicted, i.e. how long a blob is guaranteed to survive. The server assesses **critical
+   below 1 hour** and **degraded below 4 hours**; keep it comfortably above your longest
+   build (the chart's `BuildbarnCacheRetentionLow` alert fires below 24 hours).
 2. GetCacheTrends: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
-3. GetStorageHealth: hash table health — if get/put attempt counts approach the configured
-   maximums (typically GET=16, PUT=64), the hash table is too small.
+3. GetStorageHealth: `hash_table` **saturation rates** (not counts) — any sustained nonzero
+   `put_too_many_iterations_rate` or `get_too_many_attempts_rate` means the key-location map
+   is silently dropping index entries; blobs stay on disk but become unreachable. These
+   counters reset on restart, so a quiet dashboard right after a deploy proves nothing.
 
 **Sizing guidance**:
 
 | Signal | State | Recommendation |
 |--------|-------|----------------|
-| Eviction age < 2 days | Critical | Double disk size or add a storage shard |
-| Eviction age 2-7 days | Moderate | Increase disk by 50%; monitor trend |
-| Eviction age > 14 days | Healthy | No change needed |
-| Hash table attempts near max | Collisions rising | Increase key_location_map size; ensure entry count is prime |
+| Eviction age < 1 hour | Critical | Grow the disk (and key-location map) now or add a storage shard |
+| Eviction age 1-4 hours | Degraded | Increase disk by 50%; monitor trend |
+| Eviction age 4-24 hours | Watch | Below the 24h alert threshold; plan growth |
+| Eviction age > 24 hours and above your longest build | Healthy | No change needed |
+| Any nonzero hash-table saturation rate | Key-location map undersized | Grow entries/`sizeMi` (bb-storage auto-rounds the count to a prime); grow the memory request for in-memory maps |
 | High FindMissing rates | Clients re-checking existence | Enable existence caching on frontend |
 
-**Block configuration tradeoffs** (from GetBuildbarnConfig):
-- `oldBlocks`: More = better least-recently-used approximation but more I/O overhead from
-  copy-forward. Too few = first-in-first-out eviction. Typical: 6-8.
-- `currentBlocks`: Majority of the device. More = larger stable storage. Typical: 24-46.
-- `newBlocks`: Where writes land. Content Addressable Storage should use 2-4 to stagger
-  expiration times. Action Cache needs only 1.
-- `spareBlocks`: Buffer to allow reads to complete before block rotation. Typical: 3-4.
+**Key-location map sizing**: aim for **2-10x the expected live object count**
+(`usable bytes / average blob size`; measure blob sizes from GetStorageHealth
+`blob_size_bytes`). In-memory maps cost ~64 bytes per entry of eagerly allocated heap;
+on-disk maps ~66 bytes per record. **The map and the blocks are coupled: growing the disk
+without growing the map makes eviction worse, not better.**
 
-**Maximum blob size** = `device_size / total_blocks`. If actions produce larger outputs, they
-fail. Check GetStorageHealth for storage errors with large blobs.
+**Block configuration tradeoffs** (from AnalyzeBuildbarnStorage, GetBuildbarnConfig, or supplied Jsonnet):
+- `oldBlocks`: More = better least-recently-used approximation but more I/O overhead from
+  copy-forward. Too few = first-in-first-out eviction. Typical: 8.
+- `currentBlocks`: Majority of the device. More = larger stable storage. Typical: 24-30.
+- `newBlocks`: Where writes land. Content Addressable Storage should use 3 (2-4 acceptable) to
+  stagger expiration times. Action Cache (and ISCC/FSAC) **must** use 1 — bb-storage refuses
+  to start mutable stores otherwise.
+- `spareBlocks`: Buffer letting reads complete before block rotation. Typical: 3.
+
+**Maximum blob size** = `blocks bytes / total_blocks` (the block size). If actions produce
+larger outputs, uploads fail. Check GetStorageHealth `blob_size_bytes` P99 against the block size.
+
+> **Geometry changes flush persistent stores.** Changing `spareBlocks`/`oldBlocks`/
+> `currentBlocks`/`newBlocks` or the blocks/device size changes the derived block size, and a
+> persistent store discards ALL of its data on the next start. A store with an in-memory
+> key-location map restarts empty regardless. Plan geometry changes as scheduled cache flushes.
 
 ### Sharding
 
@@ -159,7 +196,7 @@ When builds get slower and the cause is not cache-related or code-related:
 | Metric | Threshold | Action | Expected Impact |
 |--------|-----------|--------|-----------------|
 | Queue wait 90th percentile > 10 seconds | Sustained over 1 hour | Add workers for affected platform | Reduces queue wait proportional to workers added |
-| Eviction age < 3 days | Sustained trend | Increase disk or add storage shard | Reduces `CACHE_EVICTED` misses |
+| Eviction age < 4 hours | Sustained trend | Increase disk and key-location map together, or add a storage shard | Reduces `CACHE_EVICTED` misses |
 | Worker CPU > 85% | Sustained during builds | Reduce worker concurrency or add workers | Reduces execution time variance |
 | Worker memory > 80% | With out-of-memory kills | Increase worker memory limits | Eliminates out-of-memory action failures |
 | Storage Get 90th percentile > 100 milliseconds | Sustained | Increase key_location_map; check disk I/O | Reduces input fetch and cache lookup times |

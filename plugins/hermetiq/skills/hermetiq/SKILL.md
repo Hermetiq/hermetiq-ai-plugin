@@ -46,7 +46,11 @@ Additional non-query tools:
 - `GetInfraHealthSummary`, `GetSchedulerQueueHealth`, `GetWorkerFleetHealth`,
   `GetStorageHealth`, `GetGrpcHealth`, `GetBuildbarnConfig`, `GetBuildbarnEvents`,
   `GetBuildbarnPodLogs`, `GetRemoteActionCommand`.
-- `show_trends_dashboard`: interactive trend dashboard MCP App.
+- `AnalyzeBuildbarnStorage`: rule-based storage-config analysis — evaluates the
+  live storage/frontend jsonnet, validates it against the bb-storage schema,
+  derives block geometry and key-location-map facts, and returns issues with
+  severities. Its `knowledge_uri` points at the `buildbarn://guides/storage-model`
+  resource for the underlying model.
 - Proto-intel tools, when enabled: `SearchBuildbarnConfigProtos`,
   `DescribeBuildbarnConfigProtoMessage`, `GetBuildbarnConfigFieldPath`,
   `ListBuildbarnServiceConfigMessages`.
@@ -55,13 +59,14 @@ Available prompts include `select_project`, `debug_cache_misses`, `analyze_build
 `invocation_insights`, `investigate_failure`, `test_failures`, `project_health`,
 `cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
 `profile_trends`, `rbe_trends`, `rbe_optimization`, `compare_periods`,
-`infra_health`, and
+`infra_health`, `analyze_storage_config`, and
 `setup_hermetiq_bazel`. Use a prompt when it matches the user's intent; otherwise
 call the tools directly.
 
-Tool availability can vary by server configuration. `GetBuildbarnConfig` requires
-Kubernetes access. Proto-intel tools/resources require proto-intel to be enabled.
-`QueryMetrics` exists in the proto but is not exposed by default.
+Tool availability can vary by server configuration. `GetBuildbarnConfig` and
+`AnalyzeBuildbarnStorage` require Kubernetes access. Proto-intel tools/resources
+require proto-intel to be enabled. `QueryMetrics` exists in the proto but is not
+exposed by default.
 
 ## Project, Build, and Invocation Context
 
@@ -120,7 +125,7 @@ Kubernetes access. Proto-intel tools/resources require proto-intel to be enabled
 | Cache misses | `GetCacheEventAgg` | `FindCacheEventGroups`, `FindCacheEvents(include_miss_analysis=true)` |
 | Failed build | `ResolveBuildOrInvocation`, `GetBuildDetails` or `GetInvocation` | `FindActions(result_filter=ACTION_FAILED)`, `GetActionExecutedDetails` |
 | Failed or flaky tests | `GetTestResults(include_logs=true)` | `GetTestTrends`, `GetTestTiming`, `GetFailedActions`, `GetFlakyActions` |
-| Build trends | `show_trends_dashboard`, `GetBuildHistorySummary`, or `GetTrendsAgg` | `GetBuildTimeseriesAgg`, `GetCacheTrends`, `GetProfileTrends`, `GetRemoteActionTrends` |
+| Build trends | `GetBuildHistorySummary` or `GetTrendsAgg` | `GetBuildTimeseriesAgg`, `GetCacheTrends`, `GetProfileTrends`, `GetRemoteActionTrends` |
 | Profile trends or "where did time go?" | `GetProfileTrends(time_range="7d")` | `GetCriticalPathTrends`, `GetRemoteActionTrends`, `GetCacheTrends`, infra tools only when profile metrics point there |
 | Time-period comparison | `GetTrendsAgg` | `GetRemoteActionTrends`, `GetCacheTrends`, `GetTargetTrends` |
 | Infrastructure bottleneck | `GetInfraHealthSummary` | `GetSchedulerQueueHealth`, `GetStorageHealth`, `GetWorkerFleetHealth`, `GetGrpcHealth` |
@@ -130,6 +135,7 @@ Kubernetes access. Proto-intel tools/resources require proto-intel to be enabled
 | Filter discovery | `GetFilters`, `GetFilterValues`, `GetFilterTags` | `LookupPatternsForFilters` |
 | Project activity | `GetProjectActivity` | `GetTrendsAgg`, `GetBuildHistorySummary` |
 | Build configuration audit | `ListInvocations` | `GetInvocation(include_cmd_line=true)`, `GetCacheTrends`, `FindCacheEvents` |
+| Storage configuration audit / sizing | `AnalyzeBuildbarnStorage` (or `GetBuildbarnConfig` only if present) | `GetStorageHealth`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
 | Hermetiq setup | `Quickstart` or `setup_hermetiq_bazel` | local `.bazelrc` follow-up when the client has file access |
 
 For cache, remote action, and target analysis, start grouped, then drill down:
@@ -269,6 +275,7 @@ component is `warning` or `critical`, drill into its tool.
 | Worker resource pressure | `GetWorkerFleetHealth` | CPU, memory, block I/O, stage timing | Tune worker size or concurrency |
 | gRPC errors | `GetGrpcHealth` | status codes, error rate, latency | Investigate service/network failures |
 | Pod restarts or out-of-memory | `GetBuildbarnEvents`, `GetBuildbarnPodLogs` | event/log evidence | Adjust limits or fix failing component |
+| Storage config suspicion | `AnalyzeBuildbarnStorage` | validation errors, geometry/key-location-map issues, assessment | Run the Storage Configuration Audit playbook |
 | Config suspicion | `GetBuildbarnConfig` plus proto-intel tools | storage, scheduler, worker fields | Validate Jsonnet/proto settings |
 
 ### Cost Optimization
@@ -341,6 +348,37 @@ Only calculate savings when required inputs are present, such as `miss_count`,
    `PLATFORM_SUFFIX_CHANGED`, and `INPUT_CHANGED` miss reasons.
 5. Load `references/build-configuration.md` and `references/bazel-optimization.md`
    when giving concrete `.bazelrc` or BUILD-file guidance.
+
+### Storage Configuration Audit
+
+1. Call `AnalyzeBuildbarnStorage` (optionally `store=` and `time_range=`). It returns
+   per-store geometry and key-location-map facts, schema-validation errors, shard
+   topology, and rule-based issues with severities. If it is not registered, first
+   check whether `GetBuildbarnConfig` is present in tools/list; when it is, call
+   `GetBuildbarnConfig(component="storage")` plus `component="frontend"`, interpret
+   fields with the proto-intel tools, and read the `buildbarn://guides/storage-model`
+   resource for the model. If neither live Kubernetes-backed tool is present, ask the
+   operator for the storage/frontend/common ConfigMap Jsonnet (or use ConfigSets tools
+   where present) and label the result as config-supplied rather than live-cluster
+   verified.
+2. Corroborate with `GetStorageHealth` for the same window: `eviction_age_hours`
+   (critical below 1 hour, degraded below 4), `hash_table` saturation rates (any
+   sustained nonzero rate means the key-location map is undersized), latencies, and
+   error rates. Note the saturation counters reset on restart.
+3. For stores on raw block devices the config cannot reveal the device size — ask
+   the operator for the device or PVC size, then finish the arithmetic
+   (block size = device bytes / total blocks; one block is the largest storable blob).
+4. Map each issue to a remediation with two standing cautions: geometry changes
+   (block counts or blocks/device size) flush a persistent store on next start, and
+   the key-location map must grow together with the blocks (plus the memory request
+   when the map is in memory). Load `references/infrastructure-tuning.md` for the
+   sizing tables.
+5. Where the ConfigSets tools are present in tools/list (git-managed Buildbarn
+   config), preview a change with `config_v1_ConfigSets_RenderFile`, review history
+   with `DiffCommits`, and propose the fix with `CreateConfigSetPullRequest`. When
+   they are absent, present the recommended jsonnet values for the operator to apply.
+6. Report per store: current facts, issues with severity and confidence, and the
+   concrete recommended values.
 
 ## Evidence and Output Rules
 

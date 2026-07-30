@@ -18,6 +18,12 @@
       "prompt": "Our cache hit rate has been dropping steadily over the past two weeks. It used to be around 85% and now it's hovering around 60%. We haven't changed our .bazelrc or toolchain recently. What's going on?",
       "expected_output": "Should follow the 'Improve our cache hit rate' playbook: pull cache trends with GetCacheTrends using time_range=\"14d\" or time_range=\"30d\", identify which mnemonics degraded with GetCacheEventAgg or FindCacheEventGroups, drill into miss reasons with FindCacheEvents include_miss_analysis=true, and check for storage eviction pressure, configuration drift between users, or volatile code generation. Should reference build-configuration.md for detailed flag audits when configuration drift is suspected.",
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Our remote cache seems undersized — builds started missing cache mid-day, and I've even seen NotFound errors for blobs we uploaded just minutes earlier. Can you audit our Buildbarn storage configuration and tell us what to change?",
+      "expected_output": "Should follow the 'Storage Configuration Audit' playbook: call AnalyzeBuildbarnStorage; if it is not registered, use GetBuildbarnConfig component=\"storage\" plus proto-intel tools and the buildbarn://guides/storage-model resource only when GetBuildbarnConfig is also present, otherwise ask the operator for the storage/frontend/common ConfigMap Jsonnet or use ConfigSets tools where present and label the result as config-supplied. Then corroborate with GetStorageHealth — eviction_age_hours judged in HOURS (critical below 1, degraded below 4) and hash_table saturation rates. Should recognize NotFound-minutes-after-upload as the key-location-map saturation signature (put_too_many_iterations_rate above zero), recommend growing the key-location map together with any disk growth (they are coupled), warn that block-geometry changes flush a persistent store on the next start, ask the operator for raw device sizes when the config cannot reveal them, and deliver per-store recommendations in Finding/Impact/Recommendation/Effort/Priority form with confidence labels.",
+      "files": []
     }
   ]
 }

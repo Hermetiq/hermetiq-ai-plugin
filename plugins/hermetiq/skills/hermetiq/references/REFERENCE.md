@@ -428,35 +428,56 @@ without changing the declared input hash. This causes:
 
 #### Local Storage Backend
 The primary on-disk backend (`LocalBlobAccess`) concatenates blobs into a large file or raw
-block device, indexed by a **cuckoo hash table**. The hash table preferentially displaces
-older entries, making it self-cleaning with no garbage collection.
+block device, indexed by a fixed-size open-addressed **key-location map** that preferentially
+displaces older entries, making it self-cleaning with no garbage collection — and meaning it
+**never grows**: sizing it is an explicit operator decision.
 
-**Block rotation model**: The storage device is divided into blocks that serve four roles.
-Blocks rotate through these roles over time as data ages:
+**Block rotation model**: The storage is divided into fixed-size blocks that serve four
+roles. **The block is the unit of eviction** — when the oldest *new* block fills, the ranges
+rotate forward and the oldest *old* block is discarded whole; there is no per-blob garbage
+collection:
 
-1. **Old blocks** (typical: 6-8): When a blob in an old block is read, it is copied forward
-   to a new block. This implements pseudo least-recently-used eviction — frequently accessed
-   blobs survive longer. Fewer old blocks makes eviction more first-in-first-out. More old
-   blocks improves retention of hot data but increases copy overhead.
-2. **Current blocks** (typical: 24-46): Stable storage. Should be the majority of the device.
+1. **Old blocks** (typical: 8): When a blob in an old block is read, it is copied forward
+   to a new block ("refresh"). This implements pseudo least-recently-used eviction —
+   frequently accessed blobs survive longer. Fewer old blocks makes eviction more
+   first-in-first-out. More old blocks improves retention of hot data but stores duplicates.
+2. **Current blocks** (typical: 24-30): Stable storage. Should be the majority of the device.
    No copy-forward overhead for reads.
-3. **New blocks** (typical: 1-4): Where new writes and copy-forward data land. Content
-   Addressable Storage should use 2-4 to spread write load and stagger expiration. Action
-   Cache needs only 1.
-4. **Spare blocks** (typical: 3-4): Only used with raw block devices. Buffer so ongoing reads
-   can complete before the underlying block is recycled.
+3. **New blocks**: Where new writes and copy-forward data land. Content Addressable Storage
+   should use 3 (2-4 acceptable) to spread write load and stagger expiration. The Action
+   Cache, Initial Size Class Cache, and File System Access Cache are mutable stores and
+   **must use 1** — bb-storage refuses to start them otherwise.
+4. **Spare blocks** (typical: 3): Buffer so ongoing reads can complete before a rotated-out
+   block is recycled. Applies to `blocksOnBlockDevice` with file-backed *and* raw-device
+   sources. Too few risks `No unused blocks available` write failures.
 
-**Key sizing formula**: `max_blob_size = device_size / total_blocks`
+**Key sizing formula**: `block size = blocks bytes / total_blocks`, and one block is the
+**maximum storable blob**. More than 100 total blocks is a startup failure.
 
-**Hash table configuration**:
+**Key-location map configuration**:
 - `keyLocationMapMaximumGetAttempts`: 16 (recommended). Controls hash slot probes before
-  declaring a miss. Higher tolerates more collisions but slows lookups.
-- `keyLocationMapMaximumPutAttempts`: 64 (recommended).
-- Record count should be **prime** for optimal hash distribution.
+  declaring a miss. Unset or zero makes every lookup probe one slot.
+- `keyLocationMapMaximumPutAttempts`: 64 (recommended). Unset or zero silently drops every insert.
+- Size it at **2-10x the expected live object count** (`usable bytes / average blob size`).
+  In-memory maps cost ~64 bytes per entry of eagerly allocated heap; on-disk maps ~66 bytes
+  per record, with the record count automatically rounded down to a prime (no need to
+  pre-compute primes).
+- An undersized map fails **silently**: inserts displace older entries and eventually drop,
+  so blob bytes stay on disk but become unreachable. Watch the `hash_table` saturation rates
+  in GetStorageHealth. **The map and the blocks are coupled** — growing the disk without
+  growing the map makes eviction worse.
 - Can be stored in-memory (faster, lost on restart) or on block device (persistent).
 
-**Persistence**: `minimumEpochInterval` controls fsync frequency. Default 300 seconds.
-On SIGTERM, data is synced before shutdown.
+**Persistence**: a store survives restarts only when three pieces survive together — the
+blocks, the key-location map, and the `persistent` state directory. A store with an
+in-memory key-location map restarts **empty** regardless of disk durability (and combining
+`persistent` with an in-memory map is a misconfiguration: blocks reattach full of
+unreachable data). `minimumEpochInterval` controls state sync frequency (default 300
+seconds), which also bounds crash loss to roughly that window. On SIGTERM, data is synced
+before shutdown (two full device syncs — give the pod enough termination grace).
+**Changing any block count or the blocks/device size changes the derived block size, and a
+persistent store discards ALL of its data on the next start** — treat geometry changes as
+planned cache flushes.
 
 #### Sharding
 Distributes blobs across multiple storage backends by digest hash. Each shard has a `weight`
@@ -489,7 +510,11 @@ FindMissingBlobs request rates from many concurrent Bazel clients.
 
 #### Action Result Expiring
 Forces periodic rebuilds by expiring Action Cache entries after a configurable duration.
-Computed from `worker_completed_timestamp` with jitter to prevent rebuild storms.
+Computed from `worker_completed_timestamp` with deterministic jitter to prevent rebuild
+storms. `maximumValidityJitter` must be **nonzero**: an explicit `'0s'` panics on the first
+Action Cache hit, and leaving it unset fails startup. `minimumTimestamp` is a manual flush
+knob — setting it to "now" hides every previously cached result without touching the
+Content Addressable Storage.
 
 ### bb-scheduler: The Dispatcher
 
@@ -565,54 +590,38 @@ Two variants:
 
 Worker ↔ runner communication uses gRPC over a Unix socket for security isolation.
 
-### Hermetiq Production Configuration Reference
+### Deployment Configuration Values
 
-| Parameter | Development | Production | Notes |
-|-----------|-------------|------------|-------|
-| Content Addressable Storage disk size | 32 GB | 650 GB | 20x larger |
-| Content Addressable Storage key_location_map | 400 MB | 800 MB | On block device |
-| Content Addressable Storage old/current/new blocks | 8/24/3 | 6/46/2 | Production favors current blocks |
-| Action Cache size | 20 MB | 5 GB | 250x larger |
-| Action Cache key_location_map | 1 MB (disk) | 5M entries (memory) | Production uses in-memory for speed |
-| Storage shards | 2 | 3 | Equal weight |
-| Max tree size (completeness) | 64 MB | 256 MB | |
-| Max message size | 2 MB | 10 MB | |
-| Worker concurrency | 8 | 11 | |
-| Worker file cache files | 10,000 | 100,000 | 10x |
-| Worker file cache size | 1 GB | 5 GB | 5x |
-| Worker directory cache | 1,000/1 MB | 5,000/10 MB | 5x/10x |
-| Input download concurrency | 10 | 9 | Slightly reduced |
-| Output upload concurrency | 11 | 11 | Same |
-| Scheduler execution timeout | 1,800 seconds | 1,800 seconds | 30 minutes |
-| Scheduler max timeout | 7,200 seconds | 7,200 seconds | 2 hours |
-| Queue no-workers timeout | 900 seconds | 900 seconds | 15 minutes |
-| Tracing | Disabled | 25% sample rate | To OpenTelemetry collector |
-| Scheduler routing | Simple | Demultiplexing | Multi-container platform support |
+Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
+message limits, worker concurrency) drift per deployment and per release — do not quote
+remembered numbers. Fetch the live values with `AnalyzeBuildbarnStorage` (derived geometry,
+capacity, and findings) or `GetBuildbarnConfig` (raw jsonnet), and correlate with
+`GetStorageHealth` / `GetWorkerFleetHealth` / `GetSchedulerQueueHealth` before recommending
+changes.
 
 ### VictoriaMetrics Recording Rules
 
-Hermetiq creates 50+ recording rules for Buildbarn metrics:
+Hermetiq ships 50+ recording rules for Buildbarn metrics, named
+`<label_list>:<metric>:<aggregation>` — e.g.
+`outcome_storage_type:buildbarn_blobstore_hashing_key_location_map_put_iterations_count:irate1m`.
 
 **Storage rules**:
-- `bb:blobstore_blob_access_operations_started` — Operation count by type and backend
-- `bb:blobstore_blob_access_operations_duration_seconds_bucket` — Latency distribution
-- `bb:blobstore_local_blob_access_key_location_map_*` — Hash table health
-- `bb:blobstore_local_blob_access_old_current_new_*` — Block insertion timing
+- `backend_type_kubernetes_service_operation_storage_type:buildbarn_blobstore_blob_access_operations_started:irate1m` — operation rates by type and backend
+- `backend_type_kubernetes_service_le_operation_storage_type:buildbarn_blobstore_blob_access_operations_duration_seconds_bucket:irate1m` — latency distribution
+- `storage_type:buildbarn_blobstore_hashing_key_location_map_put_too_many_iterations:irate1m` and `...get_too_many_attempts:irate1m` — key-location-map saturation (any sustained nonzero rate = undersized map)
+- `kubernetes_shard_storage_type:buildbarn_blobstore_old_current_new_location_blob_map_last_removed_old_block_insertion_time_seconds:min` — worst-case retention per shard (the eviction-age signal behind GetStorageHealth)
 
 **Scheduler rules**:
-- `bb:scheduler_in_memory_build_queue_tasks_*` — Queue depth (queued/executing/completed)
-- `bb:scheduler_in_memory_build_queue_tasks_executing_duration_seconds_*` — Execution timing
-- `bb:scheduler_in_memory_build_queue_tasks_executing_retries_*` — Retry distribution
+- `instance_name_prefix_platform_size_class:buildbarn_builder_in_memory_build_queue_tasks_queued:sum` / `:executing:sum` / `:completed:sum` — queue depth by platform and size class
+- `instance_name_prefix_le_platform_size_class:buildbarn_builder_in_memory_build_queue_tasks_queued_duration_seconds_bucket:irate1m` — queue wait distribution
 
 **Worker rules**:
-- `bb:worker_virtual_execution_duration_seconds_*` — Action execution timing
-- `bb:worker_posix_resource_usage_*` — CPU, memory, I/O resource metrics
-- `bb:worker_file_pool_*` — Temp file pool statistics
-- `bb:worker_input_root_population_*` — Input staging timing
+- `kubernetes_service_le_stage:buildbarn_builder_build_executor_duration_seconds_bucket:irate1m` — execution stage timing
+- `kubernetes_service_le:buildbarn_builder_build_executor_posix_*` — CPU, memory, I/O resource distributions
+- `kubernetes_service_le_operation:buildbarn_builder_build_executor_file_pool_operations_*` — temp file pool statistics
 
 **Service mesh rules**:
-- `bb:grpc_server_handled_total` / `bb:grpc_client_handled_total` — Request rates
-- `bb:grpc_server_handling_seconds_bucket` — Latency distribution
-- `bb:grpc_server_msg_sent_total` / `bb:grpc_server_msg_received_total` — Message rates
+- `grpc_code_grpc_method_grpc_service_kubernetes_service:grpc_server_handled:irate1m` / `...:grpc_client_handled:irate1m` — request and error rates
+- `grpc_method_grpc_service_kubernetes_service_le:grpc_server_handling_seconds_bucket:irate1m` — latency distribution
 
 ---
