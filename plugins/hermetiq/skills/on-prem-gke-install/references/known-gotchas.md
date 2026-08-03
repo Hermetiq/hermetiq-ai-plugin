@@ -60,59 +60,69 @@ app to itself be authorized against Auth0's Management API
 authorization step from either of the above, only needed if you're automating
 grant creation rather than doing it through the Auth0 UI.
 
-## 3. RBE gRPC connection reset / hung action after sustained load (~5-6 minutes) — RESOLVED
+## 3. Large builds "hang" or reset — usually a Bazel client timeout, not a bug
 
-**Status: fixed.** Root cause was Envoy Gateway's default HTTP/2 max stream
-duration silently killing (or, in a narrower repro, hanging with zero
-progress and no client-visible error) long-lived RBE `Execute` streams and
-large `ByteStream`/`Write` uploads once they ran past Envoy's default.
+**The fix that actually matters, most of the time:** size `--remote_timeout`
+(and `--bes_timeout` if using BEP) to your build's *largest single blob
+upload*, not to a generic default:
 
-**Fix:** the `buildbarn` chart's `gateway.grpcRoutes.frontendBbCloudGrpc.backendTrafficPolicy`
-now sets both:
-```yaml
-requestTimeout: "0s"       # disables the per-request timeout
-maxStreamDuration: "0s"    # disables Envoy's max HTTP/2 stream duration
-connectionIdleTimeout: "1h"
+```bazelrc
+build:hermetiq --remote_timeout=1800s
+build:hermetiq --bes_timeout=600s
 ```
-This is the chart's own default as of the commit titled "Option to set
-maxStreamDuration" — if you're not overriding `gateway.grpcRoutes` in your
-values, you get this for free. If you previously copied the
-`backendTrafficPolicy` block into your own values file (e.g. to customize
-`connectionIdleTimeout`), make sure your copy also sets
-`maxStreamDuration: "0s"`, or you'll silently keep the old broken timeout
-even on an updated chart.
 
-**Verification:** confirmed by rendering the chart (`helm template ... |
-grep -A20 frontend-bb-cloud-grpc-timeouts`) and checking the
-`BackendTrafficPolicy` includes `maxStreamDuration: "0s"`, then running a
-build that previously hung — a `bazel test //absl/strings:string_view_test`
-against abseil-cpp had previously hung for 230+s on a single `RunBinary`
-action (`libunwind.a`) with zero worker CPU usage the whole time; after this
-fix, verify the same build completes (or, for a much larger real-world
-stress test, run the envoy example below — its full `//test/...` suite
-easily runs well past the old ~6-minute threshold).
+`--remote_timeout` defaults to **exactly 60 seconds** in Bazel. Any single
+`ByteStream.Write` (one blob upload — a static library, a fat jar, a
+toolchain-bootstrap artifact) that takes longer than that to transfer gets
+cancelled by the *client*, not the server. On a large enough project
+(Envoy proxy's toolchain bootstrap produces individual blobs upward of
+400 MiB), this is close to guaranteed to happen at least once. Symptom:
+a build that otherwise looks completely healthy — remote cache hits
+working, workers healthy — suddenly errors or silently stalls partway
+through.
 
-Original symptom (kept for reference, in case you hit something
-superficially similar with a different root cause):
-```
-rpc error: code = Unavailable
-desc = "error reading from server: EOF"
-```
-or, in the narrower single-action repro: a single `RunBinary`/`Write`-heavy
-action showing zero progress for minutes with `kubectl top pod` on the
-worker fleet staying near-zero CPU the entire time (the action was never
-dispatched to a worker — the hang was in the gateway/transport layer, not
-the scheduler).
+**Two misdiagnosis traps to avoid** (both were hit, in order, while chasing
+this — kept here so you don't repeat them):
 
-If you hit a *new* stall/reset that doesn't go away with
-`maxStreamDuration: "0s"` already set, capture before reporting it:
-- Frontend and worker logs spanning the exact failure moment
-- A `tcpdump` on the frontend pod during a build expected to run past
-  whatever threshold you're seeing
-- `kubectl top pod` on the worker fleet sampled repeatedly during the
-  stall — near-zero CPU the whole time points at gateway/dispatch, not the
-  worker itself
-- The exact wall-clock duration before failure
+1. **"The frontend has a hardcoded 60s timeout."** If you check Envoy
+   Gateway's access logs and see a `ByteStream.Write` reset at exactly
+   60000-60002ms with `response_code_details:
+   "upstream_reset_before_response_started{remote_reset}"`, it's tempting
+   to read this as the *server* enforcing a cutoff. It's almost certainly
+   just Bazel's `--remote_timeout` default cancelling its own RPC — the
+   access-log framing doesn't clearly distinguish a client-cancelled stream
+   from a genuine server-initiated reset here. Check your `--remote_timeout`
+   value before concluding it's a server/chart bug.
+2. **"The scheduler isn't dispatching work."** If, after raising
+   `--remote_timeout`, you see an action stuck with `0 running` for many
+   minutes, and `kubectl top pod` shows near-zero CPU on every worker while
+   the Hermetiq MCP server's `GetSchedulerQueueHealth` shows
+   `queue_depth: 0, executing: 0` — this looks exactly like a stuck
+   dispatcher, but `GetSchedulerQueueHealth` tracks the `Execute` queue
+   only. A stalled `ByteStream.Write` **never touches the scheduler at
+   all**, so this metric is uninformative for that failure mode. Don't
+   read "zero queue depth" as "nothing is happening" unless you've confirmed
+   the stalled RPC is actually an `Execute` call.
+
+**How to actually find the real cause of a stall/reset**, in order:
+1. Check `--remote_timeout`/`--bes_timeout` are set generously first —
+   this alone resolves the large majority of "large build hangs" cases.
+2. If it's still failing, add `--remote_grpc_log=<file>` and decode with
+   `strings -n 6 <file> | grep -B3 -A5 <failing target's mnemonic/label>`
+   (no protobuf decoder needed) — REAPI resource names embed the exact
+   blob size as plain text:
+   `{instance}/uploads/{uuid}/blobs/{sha256}/{size-in-bytes}`. If you see a
+   multi-hundred-MB blob, that's your answer.
+3. Only reach for `kubectl top pod`/`GetSchedulerQueueHealth` if the stalled
+   RPC is confirmed to be `Execute`, not `ByteStream.Write`/`Read`.
+
+**One real, separate fix still worth keeping:** the `buildbarn` chart's
+`gateway.grpcRoutes.frontendBbCloudGrpc.backendTrafficPolicy` sets
+`maxStreamDuration: "0s"` by default (disabling Envoy Gateway's own max
+HTTP/2 stream duration cap) as of the "Option to set maxStreamDuration"
+commit. This is real and independently necessary — it's just not
+sufficient on its own for builds with very large individual blobs, which
+need the Bazel-side timeout fix above regardless.
 
 ## 4. Worker runner socket transient errors during initial rollout (usually not a blocker)
 
