@@ -151,16 +151,26 @@ images:
 
 ## 5. Auth0 / OIDC setup
 
-Two (sometimes three) **separate** Auth0 applications are needed — don't try
-to reuse one for everything:
+One SSO application plus one M2M application is the minimum; the M2M app
+can (and commonly does, at least initially) cover two conceptually distinct
+audiences at once:
 
 1. **SSO app** (Regular Web Application) — dashboard/Grafana/Browser login,
    OIDC Authorization Code flow. Needs callback/logout/web-origin URLs for
    each of the three UIs.
-2. **MCP M2M app** (Machine to Machine) — MCP bearer-token auth, Client
-   Credentials flow, its own API/audience registration.
-3. **RBE M2M app** (if configuring authenticated RBE, not just `mode: allow`
-   testing) — a third, separate audience for `publisher.jwks.audience`.
+2. **M2M app** (Machine to Machine, Client Credentials flow) — covers
+   **two separate audiences**, each tied to a different chart setting:
+   - `api.mcpResourceUrl` (MCP bearer-token auth)
+   - `publisher.jwks.audience` (BEP event auth) — commonly reused as
+     `frontend.jwks.audience` (RBE cache/execute auth) too, until you
+     register RBE as its own Auth0 API. This is a legitimate interim
+     state, not a bug — see gotcha #15 for why no custom Auth0 claim is
+     needed to make `requireCanWriteToCache` authorization actually enforce
+     against it.
+   Register each audience as its own Auth0 API, and add a **Client Grant**
+   for the M2M app against every one of them separately (see below) — one
+   registered API does not imply access to another, even under the same
+   M2M application.
 
 **Critical: MCP URL must be byte-for-byte identical** (including the
 trailing slash) across all of:
@@ -175,7 +185,8 @@ auth isn't working and everything else looks right, check this first.
 
 Creating an M2M application does **not** automatically authorize it against
 an API — you (or the tenant admin) must also create a **Client Grant**
-(Applications → APIs tab → Add API, or `POST /api/v2/client-grants`).
+(Applications → APIs tab → Add API, or `POST /api/v2/client-grants`) **per
+audience** — the MCP grant doesn't imply a BEP/RBE grant, and vice versa.
 Missing this produces:
 ```
 access_denied: Client "..." is not authorized to access resource server "...".
@@ -216,6 +227,14 @@ reference the **cloud** SaaS endpoints
 (`grpcs://lb.bb.cloud-grpc.hermetiq.io`, `bep.cloud-grpc.hermetiq.io`) — for
 an on-prem install these need to point at your Gateway-routed endpoints
 instead (e.g. `grpcs://bb.<namespace>.<your-domain>`).
+
+If either `frontend.jwks.enabled` (RBE) or `publisher.jwks.enabled` (BEP) is
+`true` — i.e. you're testing real auth enforcement, not the `mode: allow`
+bypass — you'll also need a working `--credential_helper` wired to every
+authenticated host (`bep.*` and/or `bb.*`). See gotcha #14 for the working
+example script and a real stdin-handling bug worth avoiding, and gotcha #15
+for what `requireCanWriteToCache` authorization actually requires (less than
+it looks like — no custom Auth0 claim needed).
 
 **Formerly-blocking issue, now fixed:** sustained RBE builds (roughly 5-6+
 minutes of continuous remote execution) used to hit a gRPC connection reset

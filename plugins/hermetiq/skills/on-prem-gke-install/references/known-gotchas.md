@@ -308,3 +308,84 @@ were committed to git either):
   cert-manager `Certificate` resource, not a hand-created secret, and
   reapplying the `Certificate` object regenerates it automatically via the
   existing `ClusterIssuer`.
+
+## 14. The README documents BEP's server side, not the Bazel client side
+
+"Authenticating BEP event requests from Bazel using JWKS" documents
+`publisher.jwks.url/issuer/audience` (what the server will accept) in full,
+but only says "your Bazel credential helper script attaches to BEP event
+requests" — as if you already have one. It never showed the
+`--credential_helper` bazelrc syntax, the JSON request/response protocol the
+script must implement, or a working example. Fixed in
+[hermetiq-helm-gke#15](https://github.com/Hermetiq/hermetiq-helm-gke/pull/15),
+which adds a working `docs/bep-credential-helper.sh` and the missing README
+section. Two things worth knowing if you write your own before that PR
+merges:
+
+**The stdin gotcha (a real bug, not just a documentation gap):** Bazel
+writes the credential request to the helper's stdin *without* a trailing
+newline and then closes it. A script using `read -r line` sees a non-zero
+exit from `read` on that EOF — combined with `set -e` (a reasonable default
+for a credential script), this kills the script before it ever makes the
+token request. Bazel just reports `UNAUTHENTICATED` with no further detail,
+which is hard to debug without knowing this specific cause. Use
+`REQUEST=$(cat)` instead, which handles EOF-without-newline correctly.
+
+**Wire it to every host that enforces JWKS, not just BEP:** if
+`frontend.jwks.enabled: true` (RBE auth) as well as
+`publisher.jwks.enabled: true` (BEP), you need a `--credential_helper` entry
+for *both* hosts:
+```bazelrc
+build:hermetiq --credential_helper=bep.<your-domain>=/path/to/script.sh
+build:hermetiq --credential_helper=bb.<your-domain>=/path/to/script.sh
+```
+It's easy to add only the BEP one (since that's what the README section is
+about) and forget RBE needs its own entry too — a script that only pattern-
+matches `*bep.*` in the URI will silently return no token for `bb.*` calls.
+
+## 15. `requireCanWriteToCache` does not need a custom Auth0 claim/Action
+
+If you're moving `actionCache.putAuthorizer`,
+`contentAddressableStorage.putAuthorizer`, and `executeAuthorizer` off the
+`mode: allow` bypass (used for auth-free testing) to real enforcement, the
+obvious-looking target is `mode: requireCanWriteToCache`. It's tempting to
+assume this requires configuring Auth0 to inject a custom `canWriteToCache`
+claim into tokens — **it doesn't**. Buildbarn's own frontend config
+(`metadataExtractionJmespathExpression`) grants
+`authenticationMetadata.private.canWriteToCache = true` unconditionally to
+*any* caller who presents a JWT that passes `frontend.jwks`'s
+issuer/audience check — it's a Buildbarn-side grant for "authenticated at
+all," not a per-user Auth0-side authorization claim.
+
+This is a two-layer system worth understanding precisely:
+- **Authentication** (`frontend.jwks.enabled: true`) is an `any` (OR) policy:
+  a valid JWT grants the metadata above; an unauthenticated request falls
+  through to a permissive `allow: {}` branch instead and gets **no**
+  metadata. Both "succeed" at authentication — the difference is entirely in
+  what metadata comes out the other side.
+- **Authorization** (the three `*Authorizer.mode` settings) is the actual
+  gate, checking whether that metadata is present.
+
+So closing this out is just:
+```yaml
+actionCache:
+  putAuthorizer:
+    mode: requireCanWriteToCache
+contentAddressableStorage:
+  putAuthorizer:
+    mode: requireCanWriteToCache
+executeAuthorizer:
+  mode: requireCanWriteToCache
+```
+with `frontend.jwks` already configured (issuer/audience) — no Auth0-side
+change required. Verify both directions with a real Bazel invocation: no
+credential helper attached should fail with `"the current account is not
+authorized to use remote execution"`; with the credential helper attached
+(see #14) it should succeed with `N remote` actions in the build summary.
+
+Note also that `frontend.jwks.audience` (RBE) commonly reuses the same
+Auth0 audience as `publisher.jwks.audience` (BEP) rather than having its own
+registered API — this works fine (Auth0 doesn't care that one audience
+covers two purposes), it's just less independently revocable long-term. Not
+a blocker; a legitimate interim state, not something requiring an Auth0
+Action to "fix."
