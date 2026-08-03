@@ -60,39 +60,59 @@ app to itself be authorized against Auth0's Management API
 authorization step from either of the above, only needed if you're automating
 grant creation rather than doing it through the Auth0 UI.
 
-## 3. RBE gRPC connection reset after sustained load (~5-6 minutes)
+## 3. RBE gRPC connection reset / hung action after sustained load (~5-6 minutes) — RESOLVED
 
-**Status at time of writing: unresolved, tracked upstream.**
+**Status: fixed.** Root cause was Envoy Gateway's default HTTP/2 max stream
+duration silently killing (or, in a narrower repro, hanging with zero
+progress and no client-visible error) long-lived RBE `Execute` streams and
+large `ByteStream`/`Write` uploads once they ran past Envoy's default.
 
-Bazel builds executing on Buildbarn RBE workers can fail after roughly 5-6
-minutes of continuous remote execution, with all gRPC connections resetting
-simultaneously:
+**Fix:** the `buildbarn` chart's `gateway.grpcRoutes.frontendBbCloudGrpc.backendTrafficPolicy`
+now sets both:
+```yaml
+requestTimeout: "0s"       # disables the per-request timeout
+maxStreamDuration: "0s"    # disables Envoy's max HTTP/2 stream duration
+connectionIdleTimeout: "1h"
+```
+This is the chart's own default as of the commit titled "Option to set
+maxStreamDuration" — if you're not overriding `gateway.grpcRoutes` in your
+values, you get this for free. If you previously copied the
+`backendTrafficPolicy` block into your own values file (e.g. to customize
+`connectionIdleTimeout`), make sure your copy also sets
+`maxStreamDuration: "0s"`, or you'll silently keep the old broken timeout
+even on an updated chart.
 
+**Verification:** confirmed by rendering the chart (`helm template ... |
+grep -A20 frontend-bb-cloud-grpc-timeouts`) and checking the
+`BackendTrafficPolicy` includes `maxStreamDuration: "0s"`, then running a
+build that previously hung — a `bazel test //absl/strings:string_view_test`
+against abseil-cpp had previously hung for 230+s on a single `RunBinary`
+action (`libunwind.a`) with zero worker CPU usage the whole time; after this
+fix, verify the same build completes (or, for a much larger real-world
+stress test, run the envoy example below — its full `//test/...` suite
+easily runs well past the old ~6-minute threshold).
+
+Original symptom (kept for reference, in case you hit something
+superficially similar with a different root cause):
 ```
 rpc error: code = Unavailable
 desc = "error reading from server: EOF"
 ```
+or, in the narrower single-action repro: a single `RunBinary`/`Write`-heavy
+action showing zero progress for minutes with `kubectl top pod` on the
+worker fleet staying near-zero CPU the entire time (the action was never
+dispatched to a worker — the hang was in the gateway/transport layer, not
+the scheduler).
 
-What's been ruled out:
-- Worker socket initialization (`/worker/runner` exists and is healthy)
-- Worker pod crashes (0 restarts, pods stay `Running`)
-- Resource exhaustion (CPU/memory well within limits)
-- Auth/network connectivity (the failure only happens *after* 5-6 minutes of
-  successful traffic)
-
-If you hit this, capture before reporting it:
+If you hit a *new* stall/reset that doesn't go away with
+`maxStreamDuration: "0s"` already set, capture before reporting it:
 - Frontend and worker logs spanning the exact failure moment
-- A `tcpdump` on the frontend pod during a build that's expected to run past
-  the threshold, to determine which side sends the RST/FIN
-- The exact wall-clock duration before failure (is it always ~6 min, or does
-  it scale with something else — task count, total bytes transferred?)
-- Whether `gateway.gke.backendPolicy.timeoutSec` (if using
-  `gateway-httproute-only`) is set below the failure threshold — rule this
-  out first since it's the one user-controllable timeout in the request path
-
-This blocks any RBE example whose full build/test run exceeds the threshold —
-note it explicitly in your `examples-results.md` rather than assuming a
-config mistake.
+- A `tcpdump` on the frontend pod during a build expected to run past
+  whatever threshold you're seeing
+- `kubectl top pod` on the worker fleet sampled repeatedly during the
+  stall — near-zero CPU the whole time points at gateway/dispatch, not the
+  worker itself
+- The exact wall-clock duration before failure
 
 ## 4. Worker runner socket transient errors during initial rollout (usually not a blocker)
 
@@ -210,3 +230,71 @@ substituting a local chart checkout. The translation is mechanical (drop
 get wrong on a long multi-flag Helm command — write out the full substituted
 command before running it rather than editing in place, so it's easy to diff
 against the original example.
+
+## 11. `RbeWorker` custom resources aren't part of the `buildbarn` Helm release
+
+Worker pools (`kubectl apply -f custom-values/rbeworkers/worker-*.yaml`) are
+applied separately from `helm install buildbarn`, the same way a DragonflyDB
+CR instance is applied separately from the Hermetiq chart. Two consequences:
+
+- **On uninstall:** `helm uninstall buildbarn` removes the frontend/scheduler/
+  storage but leaves any `RbeWorker` resources — and their pods — running.
+  Delete them explicitly first: `kubectl -n <namespace> delete rbeworker --all`.
+  Skipping this can leave orphaned worker pods that end up in a terminal
+  `Failed` phase once their backing Secrets/ConfigMaps disappear from other
+  `helm uninstall` steps, which in turn can **block `kubectl delete namespace`
+  from completing** — the namespace controller won't finish while any pod
+  object still exists, even a fully-exited one. If you hit a stuck-terminating
+  namespace, check `.status.conditions` on the namespace object first (it
+  names the exact blocking resource type) rather than reaching for
+  `kubectl delete namespace --grace-period=0 --force`, which does not
+  actually override server-side finalizer content-deletion the way it looks
+  like it should.
+- **On reinstall into a namespace you just deleted and recreated:** you must
+  reapply every `RbeWorker` manifest again — `helm install`ing Hermetiq/
+  Buildbarn fresh does not bring worker pools back on its own.
+
+## 12. Recreating the Gateway changes its external IP — DNS needs a manual update
+
+If you delete and recreate the namespace (or just the `Gateway` object), the
+Envoy Gateway / GKE Gateway controller provisions a **new** LoadBalancer
+service with a **new** external IP. Any DNS record pointing at the old IP
+(e.g. `*.<namespace>.<domain>` → old IP) keeps resolving to the old,
+now-dead address until you update it:
+
+```bash
+kubectl -n <namespace> get gateway <name> -o jsonpath='{.status.addresses[0].value}'
+# compare against your current DNS record, then update if different:
+gcloud dns record-sets update "*.<namespace>.<domain>." \
+  --zone=<zone> --type=A --ttl=300 --rrdatas=<new-ip>
+```
+Everything downstream (MCP auth, Grafana login redirects, RBE endpoint
+connectivity) will fail with generic connection timeouts — not an obviously
+DNS-shaped error — until this is fixed. Check the Gateway's actual IP against
+DNS early if a freshly-recreated namespace's routes seem unreachable.
+
+## 13. A fresh namespace needs its non-chart-managed secrets recreated by hand
+
+None of these are created by `helm install` — they're either manually
+created (per the install README's Auth0/DragonflyDB/Grafana sections) or
+provisioned externally (CloudSQL). Deleting and recreating a namespace loses
+all of them, and none are recoverable from Kubernetes state (by design — none
+were committed to git either):
+
+- `postgres-db` — password for the chart's CloudSQL user. If you don't have
+  the original password saved, you'll need to reset it:
+  `gcloud sql users set-password <user> --instance=<instance> --password=<new>`
+  (scoped to that one user, doesn't affect other databases/users on a shared
+  instance) — then recreate the k8s Secret with the new value.
+- `dragonfly-auth`, `grafana-admin` — fine to regenerate fresh
+  (`openssl rand -base64 24`), nothing depends on the old value surviving.
+- `oauth2-proxy-client` — the Auth0 SSO application's Client ID/Secret. The
+  Client ID is public and fine to keep around, but the Client Secret is
+  normally never saved anywhere retrievable (per the "don't commit secrets"
+  rule) — you'll need to look it up or rotate it in the Auth0 dashboard
+  (Applications → your SSO app → Settings → Client Secret) and recreate the
+  k8s Secret from that.
+- `nick-wildcard-tls` (or equivalent) — no manual work needed; this is a
+  cert-manager `Certificate` resource, not a hand-created secret, and
+  reapplying the `Certificate` object regenerates it automatically via the
+  existing `ClusterIssuer`.

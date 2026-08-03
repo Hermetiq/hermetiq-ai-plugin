@@ -217,13 +217,18 @@ reference the **cloud** SaaS endpoints
 an on-prem install these need to point at your Gateway-routed endpoints
 instead (e.g. `grpcs://bb.<namespace>.<your-domain>`).
 
-**Known blocker to watch for:** sustained RBE builds (roughly 5-6+ minutes of
-continuous remote execution) may hit a gRPC connection reset even when
-workers remain healthy (0 restarts, `Running`). This is not a config mistake
-on your part if you hit it — see `references/known-gotchas.md` gotcha #3 for
-the current investigation status and what evidence to capture
-(`tcpdump`, frontend/worker logs, exact wall-clock time of the reset) if you
-need to report it.
+**Formerly-blocking issue, now fixed:** sustained RBE builds (roughly 5-6+
+minutes of continuous remote execution) used to hit a gRPC connection reset
+or hung action even when workers stayed healthy — root cause was Envoy
+Gateway's default max HTTP/2 stream duration killing long-lived RBE
+`Execute`/`ByteStream` streams. Fixed by the `buildbarn` chart defaulting
+`maxStreamDuration: "0s"` on the frontend's `BackendTrafficPolicy`. If you're
+on a chart version old enough to predate this, or you've overridden
+`gateway.grpcRoutes` in your own values without carrying this setting
+forward, see `references/known-gotchas.md` gotcha #3 for the fix and how to
+verify it's actually applied. A large-scale example that reliably exercises
+this path is the `envoy` RBE example below — its full test suite runs well
+past the old failure threshold.
 
 ## 8. Verify MCP, VictoriaMetrics, and Grafana
 
