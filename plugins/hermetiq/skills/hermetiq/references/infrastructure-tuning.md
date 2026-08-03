@@ -158,6 +158,30 @@ platform properties (operating system family, container image, instruction set a
 3. `platformQueueWithNoWorkersTimeout` (default 900 seconds) — queues with no workers are
    removed after this duration
 
+**Platform identity is declared in several places and they must move together.** Matching is on the
+exact property set, so a client-side change to any property value creates a different queue. When a
+deployment updates a platform value, every one of these needs the same edit:
+
+- the worker pool's advertised `platformProperties`
+- any scheduler action-router or demultiplexing backend entry keyed on that platform (a stale key
+  means the action falls through to the default router, losing that route's execution timeouts,
+  invocation key extractors, and size-class config — and a `static` platform key extractor on the
+  default route can silently send the work to an entirely different pool)
+- any autoscaler query that selects on the serialized platform string; a stale selector reads zero
+  queue depth forever, so the pool never scales up on demand
+
+Two failure signatures distinguish a property mismatch from an image mismatch:
+
+| Bazel outcome | Remote executions | Meaning |
+|---------------|-------------------|---------|
+| `REMOTE_ERROR` (exit 34) | zero | No worker advertises the requested platform. Nothing matched; no queue served it. |
+| `BUILD_FAILURE` | nonzero | The platform matched and actions ran, then failed inside the worker's userspace. |
+
+Watching `REMOTE_ERROR` flip to `BUILD_FAILURE` across a config rollout is the fingerprint of an
+advertised property being bumped without the runner image being bumped with it. See the
+`container-image` subsection under bb-runner in `REFERENCE.md` — the property is only a matching
+key, never an image Buildbarn pulls.
+
 ### Invocation Stickiness
 
 `workerInvocationStickinessLimits` keeps a worker assigned to the same Bazel invocation for a

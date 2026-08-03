@@ -590,6 +590,45 @@ Two variants:
 
 Worker ↔ runner communication uses gRPC over a Unix socket for security isolation.
 
+#### The `container-image` property is a matching key, not an image to pull
+
+Buildbarn **does not pull the `container-image` platform property**. Unlike some remote execution
+services, there is no per-action container launch. The property is only an opaque string the
+scheduler uses to route an action to a platform queue. The userspace an action actually executes in
+comes from the **runner container image** in the worker pool's Deployment pod spec.
+
+Consequences:
+- A pool can advertise `container-image: docker://example/build@sha256:abc…` while its runner image
+  is something entirely different. Deployments do this deliberately so clients that hardcode an
+  image digest can match a pool that provides an equivalent toolchain. It is a promise the operator
+  keeps manually — nothing validates it.
+- When the two drift, actions schedule and execute normally, then fail inside the wrong userspace.
+  The Bazel-visible error is a dynamic loader failure, not a build error: `version 'GLIBC_x.y' not
+  found`, `cannot open shared object file`, `cannot execute binary file`, a missing ELF interpreter,
+  or a missing interpreter such as `/usr/bin/env python3`.
+- Hermetic toolchains sharpen this. When Bazel stages a toolchain into the action input tree (the
+  failing executable path is under `external/`, e.g. `external/llvm_toolchain_llvm/bin/clang`), that
+  binary comes from the repository's toolchain pin, not the image. Bumping such a pin can raise the
+  binary's libc floor above what the worker image provides. The toolchain is then *newer* than the
+  execution environment, and the image is the stale side.
+- `dockerPrivileged`, `dockerNetwork`, and `dockerAddCapabilities` are likewise inert matching keys.
+  Real pod privileges come from the worker Deployment's `securityContext`.
+
+Base image to glibc, for judging whether a required symbol version can possibly resolve:
+
+| Base image | glibc |
+|------------|-------|
+| Ubuntu 20.04 | 2.31 |
+| Ubuntu 22.04 | 2.35 |
+| Ubuntu 24.04 | 2.39 |
+| Debian 11 bullseye | 2.31 |
+| Debian 12 bookworm | 2.36 |
+| Debian 13 trixie | 2.41 |
+
+Hermetiq MCP does not currently expose runner container images; they live in worker Deployment pod
+specs, and `GetBuildbarnConfig` returns component jsonnet only. Treat the runner image as an
+operator-supplied fact and label it as such.
+
 ### Deployment Configuration Values
 
 Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,

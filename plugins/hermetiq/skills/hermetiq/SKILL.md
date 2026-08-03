@@ -3,9 +3,11 @@ name: hermetiq
 description: >
   Bazel build optimization expert for Hermetiq analytics. Use when helping users
   investigate slow or failed builds, cache misses, cache hit rate regressions,
-  remote execution timing, Buildbarn infrastructure health, worker fleet sizing,
-  build cost, flaky or failed tests, target/action trends, build configuration
-  drift, profile-derived invocation insights, Bazel JSON profile trends, or
+  remote execution timing, remote actions failing from a wrong execution
+  environment such as GLIBC or shared library loader errors, Buildbarn
+  infrastructure health, worker fleet sizing, build cost, flaky or failed tests,
+  target/action trends, build configuration drift, profile-derived invocation
+  insights, Bazel JSON profile trends, or
   comparisons across time periods. Interprets Hermetiq MCP telemetry and
   proto-backed analytics with Bazel, remote cache, remote execution, and
   Buildbarn domain knowledge.
@@ -56,7 +58,8 @@ Additional non-query tools:
   `ListBuildbarnServiceConfigMessages`.
 
 Available prompts include `select_project`, `debug_cache_misses`, `analyze_build`,
-`invocation_insights`, `investigate_failure`, `test_failures`, `project_health`,
+`invocation_insights`, `investigate_failure`, `diagnose_exec_environment`,
+`test_failures`, `project_health`,
 `cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
 `profile_trends`, `rbe_trends`, `rbe_optimization`, `compare_periods`,
 `infra_health`, `analyze_storage_config`, and
@@ -124,6 +127,7 @@ exposed by default.
 | Slow build | `ResolveBuildOrInvocation`, `GetBuildDetails` or `GetInvocation` | `GetInvocationInsights`, `GetCacheEventAgg`, `GetRemoteExecutionAnalytics`, `GetBuildParallelism` |
 | Cache misses | `GetCacheEventAgg` | `FindCacheEventGroups`, `FindCacheEvents(include_miss_analysis=true)` |
 | Failed build | `ResolveBuildOrInvocation`, `GetBuildDetails` or `GetInvocation` | `FindActions(result_filter=ACTION_FAILED)`, `GetActionExecutedDetails` |
+| Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `FindRemoteActions(result_filter=ACTION_FAILED)` | `GetRemoteActionCommand` for the requested platform, `ListBuilds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
 | Failed or flaky tests | `GetTestResults(include_logs=true)` | `GetTestTrends`, `GetTestTiming`, `GetFailedActions`, `GetFlakyActions` |
 | Build trends | `GetBuildHistorySummary` or `GetTrendsAgg` | `GetBuildTimeseriesAgg`, `GetCacheTrends`, `GetProfileTrends`, `GetRemoteActionTrends` |
 | Profile trends or "where did time go?" | `GetProfileTrends(time_range="7d")` | `GetCriticalPathTrends`, `GetRemoteActionTrends`, `GetCacheTrends`, infra tools only when profile metrics point there |
@@ -275,6 +279,7 @@ component is `warning` or `critical`, drill into its tool.
 | Worker resource pressure | `GetWorkerFleetHealth` | CPU, memory, block I/O, stage timing | Tune worker size or concurrency |
 | gRPC errors | `GetGrpcHealth` | status codes, error rate, latency | Investigate service/network failures |
 | Pod restarts or out-of-memory | `GetBuildbarnEvents`, `GetBuildbarnPodLogs` | event/log evidence | Adjust limits or fix failing component |
+| Remote actions fail for one toolchain only, with loader rather than compiler errors | `FindRemoteActions`, `GetRemoteActionCommand` | failed vs succeeded mnemonics, distinct `worker_pod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
 | Storage config suspicion | `AnalyzeBuildbarnStorage` | validation errors, geometry/key-location-map issues, assessment | Run the Storage Configuration Audit playbook |
 | Config suspicion | `GetBuildbarnConfig` plus proto-intel tools | storage, scheduler, worker fields | Validate Jsonnet/proto settings |
 
@@ -337,6 +342,64 @@ Only calculate savings when required inputs are present, such as `miss_count`,
 4. Use `GetFailedActions` or `GetFlakyActions` for project-wide patterns.
 5. Check infrastructure only when failure timing or error messages point to remote
    execution, worker, storage, or network issues.
+6. Classify the failure before blaming the code. If failed actions' stderr shows a
+   dynamic loader or exec error rather than a compiler or test diagnostic —
+   `version 'GLIBC_x.y' not found`, `cannot open shared object file`, `cannot execute
+   binary file`, a missing ELF interpreter, or a missing interpreter such as
+   `/usr/bin/env python3` — the binary is intact and the environment it ran in is
+   wrong. That is neither a code bug nor a flake; run the Remote Execution
+   Environment Mismatch playbook instead.
+
+### Remote Execution Environment Mismatch
+
+For remote actions that fail because they executed in the wrong userspace. The tell is a
+dynamic loader or exec error instead of a compiler/test diagnostic. Do not report these as
+code bugs, flakes, or resource exhaustion.
+
+1. Fix the failure class. `GetInvocation` — record `exit_code`, `exit_code_name`, and
+   `failure_message`. A message like "`<Mnemonic>` returned a non-zero exit code when
+   running remotely" points at the environment, not the build graph.
+2. Partition failed against passed. This is the discriminating step. Call
+   `FindRemoteActions(result_filter=ACTION_FAILED)` and again with `ACTION_SUCCESS`, and
+   read the per-mnemonic summary from `GetInvocation(include_actions_summary=true)` plus the
+   critical path.
+   - Failures confined to one toolchain's mnemonics (for example every `CppCompile`) while
+     other mnemonics succeed remotely (`Javac`, `GoCompile`, `GoStdlib`, Java tool actions)
+     is the environment-mismatch signature: only binaries with a high libc floor fail.
+   - Failures spread across unrelated mnemonics means fleet, storage, or network instead —
+     switch to the infrastructure flow.
+   Bazel does not publish successful `ActionExecuted` events by default, so a zero success
+   count in the actions summary is not evidence that nothing succeeded. Use the remote
+   action rows and the critical path.
+3. Rule out one bad node. Collect distinct `worker_node` / `worker_pod` values on the failed
+   remote actions. Many pods of one pool means a pool-wide image or config problem; a single
+   pod means node-level drift — check `GetBuildbarnEvents` and `GetBuildbarnPodLogs` for it.
+4. Establish what was requested, and whether the failing tool is hermetic. Take a failed
+   action digest and call `GetRemoteActionCommand`. Record `platform.properties`
+   (especially `container-image`) and the failing executable's path. A path under
+   `external/` means Bazel staged that binary from the repository's toolchain pin, so the
+   toolchain — not the image — supplied it. An absolute path such as `/usr/bin/gcc` means
+   the image supplied it. This decides which side to fix: a hermetic toolchain that outran
+   the image is fixed by moving the image, not by downgrading the toolchain.
+5. Establish what actually executed. The `container-image` property is only a scheduler
+   matching key — Buildbarn never pulls it. The real userspace is the pool's **runner**
+   container image from the worker Deployment pod spec, which Hermetiq MCP does not expose
+   today (`GetBuildbarnConfig` returns component jsonnet only). Ask the operator for it,
+   then compare base OS and glibc against what the action requested. The glibc table is in
+   `references/REFERENCE.md` under bb-runner; a binary needing `GLIBC_2.34` cannot run on
+   any glibc 2.31 image.
+6. Find the regression boundary. `ListBuilds` filtered to the repository gives the last
+   success and the commit delta since. `REMOTE_ERROR` with zero remote executions means no
+   worker advertised the requested platform at all; `BUILD_FAILURE` with nonzero remote
+   executions means it matched, ran, and failed in the wrong userspace. `REMOTE_ERROR`
+   flipping to `BUILD_FAILURE` across a rollout is the fingerprint of an advertised property
+   bumped without the runner image.
+7. Report the requested environment, the actual environment, the specific missing symbol or
+   library, and which side is stale. Then list every place the platform identity is declared
+   that must move together — advertised worker properties, scheduler routes keyed on the
+   same value, autoscaler platform selectors — per the Platform Queue Management section of
+   `references/infrastructure-tuning.md`. Label which facts came from Hermetiq telemetry and
+   which came from the operator, since the runner image is not MCP-observable.
 
 ### Build Configuration Audit
 

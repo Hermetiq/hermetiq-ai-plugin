@@ -99,6 +99,16 @@ How to detect toolchain drift:
 Recommendation: pin all toolchains via Bazel's toolchain resolution. Prefer hermetic toolchains
 downloaded by Bazel over system-installed tools.
 
+**Hermetic toolchains are hermetic in the input tree, not in the libc they need.** A toolchain Bazel
+downloads is still a dynamically linked binary, and remote execution runs it against the worker
+image's C library. Raising a toolchain pin (a new LLVM, JDK, or Python) can raise the binary's libc
+floor above what the worker image supplies, and remote actions then fail with dynamic loader errors
+such as `version 'GLIBC_x.y' not found` while local builds on newer hosts keep working. The
+toolchain is not "broken" and not out of date — it has outrun the execution environment, and the
+worker image is what needs to move. Treat a toolchain bump on a remote-execution project as a
+change with a worker image prerequisite. See the `container-image` subsection under bb-runner in
+`REFERENCE.md`, and the Remote Execution Environment Mismatch playbook in `SKILL.md`.
+
 ## Configuration Recommendations Checklist
 
 When auditing a project's configuration, systematically verify:
