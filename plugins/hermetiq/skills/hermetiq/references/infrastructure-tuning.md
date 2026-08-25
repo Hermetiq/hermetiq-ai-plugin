@@ -1,6 +1,6 @@
 # Buildbarn Infrastructure Tuning Reference
 
-Use `AnalyzeBuildbarnStorage` or `GetBuildbarnConfig` when available to read live
+Use `analyze_buildbarn_storage` or `get_buildbarn_config` when available to read live
 configuration, then correlate with metrics from the infrastructure tools to identify tuning
 opportunities. If neither live config tool is present, ask the operator for the relevant
 Jsonnet/ConfigMap content before making config-specific recommendations.
@@ -9,10 +9,10 @@ Jsonnet/ConfigMap content before making config-specific recommendations.
 
 ## Storage Tuning
 
-Prefer `AnalyzeBuildbarnStorage` when it is registered (requires Kubernetes access): it
+Prefer `analyze_buildbarn_storage` when it is registered (requires Kubernetes access): it
 evaluates the live storage/frontend jsonnet, validates it against the bb-storage schema,
 derives block geometry and key-location-map facts, and returns rule-based findings with
-severities. If it is absent, use `GetBuildbarnConfig` only when that tool is also present
+severities. If it is absent, use `get_buildbarn_config` only when that tool is also present
 in tools/list; otherwise ask the operator for the storage/frontend/common ConfigMap Jsonnet
 or use ConfigSets tools when present, and label the result as config-supplied rather than
 live-cluster verified. The underlying model lives in the MCP resource
@@ -26,21 +26,20 @@ eviction — when the oldest new block fills, the ranges rotate and the oldest o
 discarded whole. A fixed-size open-addressed hash table (the **key-location map**) indexes
 blob locations and never grows.
 
-**GetStorageHealth response shape** (pass `storage_type: 'cas'` or `'ac'` to filter):
-`cas`/`ac` each carry `operations_per_sec{}`, `latency_ms{Get_p90_ms, Put_p90_ms,
-FindMissing_p90_ms}`, `error_rate_pct` (NotFound/Canceled/AlreadyExists excluded — a cache
-miss is not an error), and `blob_size_bytes` percentiles (Content Addressable Storage only);
-`disk_health{eviction_age_hours, by_shard[]}`; `hash_table{get_too_many_attempts_rate,
-put_too_many_iterations_rate, put_ignored_invalid_rate}`; `eviction[]`; `assessment`.
+**`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter):
+the structured `data` contains CAS/Action Cache operation rates, latency percentiles,
+error rate, blob-size percentiles, disk health, hash-table saturation, eviction, and
+assessment fields using proto-JSON lowerCamelCase names. Cache misses and expected status
+codes are not storage errors.
 
 **How to assess if storage is undersized**:
-1. GetStorageHealth: `disk_health.eviction_age_hours` — the age of the youngest data ever
+1. `get_storage_health`: `data.diskHealth.evictionAgeHours` — the age of the youngest data ever
    evicted, i.e. how long a blob is guaranteed to survive. The server assesses **critical
    below 1 hour** and **degraded below 4 hours**; keep it comfortably above your longest
    build (the chart's `BuildbarnCacheRetentionLow` alert fires below 24 hours).
-2. GetCacheTrends: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
-3. GetStorageHealth: `hash_table` **saturation rates** (not counts) — any sustained nonzero
-   `put_too_many_iterations_rate` or `get_too_many_attempts_rate` means the key-location map
+2. `get_cache_trends`: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
+3. `get_storage_health`: hash-table **saturation rates** (not counts) — any sustained nonzero
+   `putTooManyIterationsRate` or `getTooManyAttemptsRate` means the key-location map
    is silently dropping index entries; blobs stay on disk but become unreachable. These
    counters reset on restart, so a quiet dashboard right after a deploy proves nothing.
 
@@ -56,12 +55,12 @@ put_too_many_iterations_rate, put_ignored_invalid_rate}`; `eviction[]`; `assessm
 | High FindMissing rates | Clients re-checking existence | Enable existence caching on frontend |
 
 **Key-location map sizing**: aim for **2-10x the expected live object count**
-(`usable bytes / average blob size`; measure blob sizes from GetStorageHealth
-`blob_size_bytes`). In-memory maps cost ~64 bytes per entry of eagerly allocated heap;
+(`usable bytes / average blob size`; measure blob sizes from `get_storage_health`).
+In-memory maps cost ~64 bytes per entry of eagerly allocated heap;
 on-disk maps ~66 bytes per record. **The map and the blocks are coupled: growing the disk
 without growing the map makes eviction worse, not better.**
 
-**Block configuration tradeoffs** (from AnalyzeBuildbarnStorage, GetBuildbarnConfig, or supplied Jsonnet):
+**Block configuration tradeoffs** (from analyze_buildbarn_storage, get_buildbarn_config, or supplied Jsonnet):
 - `oldBlocks`: More = better least-recently-used approximation but more I/O overhead from
   copy-forward. Too few = first-in-first-out eviction. Typical: 8.
 - `currentBlocks`: Majority of the device. More = larger stable storage. Typical: 24-30.
@@ -71,7 +70,7 @@ without growing the map makes eviction worse, not better.**
 - `spareBlocks`: Buffer letting reads complete before block rotation. Typical: 3.
 
 **Maximum blob size** = `blocks bytes / total_blocks` (the block size). If actions produce
-larger outputs, uploads fail. Check GetStorageHealth `blob_size_bytes` P99 against the block size.
+larger outputs, uploads fail. Check the returned blob-size P99 against the block size.
 
 > **Geometry changes flush persistent stores.** Changing `spareBlocks`/`oldBlocks`/
 > `currentBlocks`/`newBlocks` or the blocks/device size changes the derived block size, and a
@@ -108,10 +107,10 @@ The `concurrency` setting controls parallel actions per worker. Must match avail
 and memory.
 
 **How to assess**:
-1. GetWorkerFleetHealth: CPU utilization per worker.
+1. `get_worker_fleet_health`: CPU utilization per worker.
    - Consistently >85% → concurrency too high, actions contend for CPU.
    - Consistently <50% → concurrency too low, worker capacity wasted.
-2. GetBuildbarnEvents: out-of-memory kills → concurrency × per-action memory exceeds limit.
+2. `list_buildbarn_events`: out-of-memory kills → concurrency × per-action memory exceeds limit.
 3. High execution time variance within the same mnemonic → resource contention.
 
 **Starting point**: `concurrency = vCPU count - 1` (headroom for the worker process).
@@ -130,9 +129,9 @@ I/O-bound workloads can exceed vCPU count.
 
 **Diagnosing input fetch issues**:
 1. High `input_fetch_ms` → workers are slow to stage inputs
-2. GetWorkerFleetHealth: `input_root_population` stage timing
+2. get_worker_fleet_health: `input_root_population` stage timing
 3. Native mode: check file cache size and `maximumCacheFileCount`
-4. Virtual filesystem mode: check if prefetching is enabled in GetBuildbarnConfig
+4. Virtual filesystem mode: check if prefetching is enabled in get_buildbarn_config
 
 ### Worker File Cache
 
@@ -153,7 +152,7 @@ The scheduler maintains separate queues per platform. Actions match to queues ba
 platform properties (operating system family, container image, instruction set architecture).
 
 **Diagnosing platform issues**:
-1. GetSchedulerQueueHealth shows per-platform breakdown
+1. `get_scheduler_health` shows per-platform breakdown
 2. One platform with high queue depth while others are idle → that platform is under-provisioned
 3. `platformQueueWithNoWorkersTimeout` (default 900 seconds) — queues with no workers are
    removed after this duration
@@ -203,14 +202,14 @@ in 2 seconds on a large worker but 30 seconds on a small one.
 
 When builds get slower and the cause is not cache-related or code-related:
 
-1. **Timeline correlation**: GetInfraHealthSummary for a slow build. Compare to the same
+1. **Timeline correlation**: `summarize_infrastructure_health` for a slow build. Compare to the same
    tool for a recent fast build of the same targets.
-2. **Storage**: GetStorageHealth → Is eviction age dropping? Are latencies up? Error rates?
-3. **Workers**: GetWorkerFleetHealth → CPU/memory spiking? Execution stage timings changing?
-   GetBuildbarnEvents for out-of-memory kills during the build window.
-4. **Scheduler**: GetSchedulerQueueHealth → Queue depth growing? Specific platforms backed up?
-5. **Network**: GetGrpcHealth → Error rates or latencies elevated between components?
-6. **Configuration**: GetBuildbarnConfig → Has anything changed? Compare concurrency, storage
+2. **Storage**: `get_storage_health` → Is eviction age dropping? Are latencies up? Error rates?
+3. **Workers**: `get_worker_fleet_health` → CPU/memory spiking? Execution stage timings changing?
+   Use `list_buildbarn_events` for out-of-memory kills during the build window when listed.
+4. **Scheduler**: `get_scheduler_health` → Queue depth growing? Specific platforms backed up?
+5. **Network**: `get_grpc_health` → Error rates or latencies elevated between components?
+6. **Configuration**: `get_buildbarn_config` → Has anything changed? Compare concurrency, storage
    sizes, and shard counts to what metrics suggest is needed.
 
 ---

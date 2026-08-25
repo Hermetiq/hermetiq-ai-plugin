@@ -5,17 +5,18 @@ configuration from Hermetiq telemetry and recommend improvements.
 
 ## Detecting Configuration from Invocation Data
 
-Use ListInvocations (`time_range="7d"` or a user-requested window) to select representative
-attempts, then call GetInvocation (`include_cmd_line=true`) to inspect effective configuration.
-If the user gives an opaque ID, call ResolveBuildOrInvocation first and use the returned
-`invocation_id` for invocation-level configuration checks.
+Use `list_invocations(lookback="7d")` or a user-requested supported window to select
+representative attempts, then call
+`get_invocation(invocationId=..., includeCommandLine=true)` to inspect effective
+configuration. If the user gives an opaque ID, call `resolve_build_or_invocation` first and
+use the returned invocation ID for invocation-level configuration checks.
 
 - **Command-line flags**: Look for `--define`, `--copt`, `--action_env`,
   `--platform_suffix`, `--stamp`/`--nostamp`, `--incompatible_strict_action_env`,
   `--remote_download_minimal`, and `--jobs`.
-- **Platform settings**: `platform_name` and `cpu` show the target platform. Remote execution
+- **Platform settings**: `platformName` and `cpu` show the target platform. Remote execution
   and remote cache fields show which remote features are enabled.
-- **Build tool version**: `build_tool_version` reveals the Bazel version.
+- **Build tool version**: `buildToolVersion` reveals the Bazel version.
 - **User and host**: `user` and `host` identify who ran the build and from where.
 
 ## Configuration Drift Detection
@@ -25,12 +26,13 @@ developers using different flags produce different action cache keys, fragmentin
 
 How to detect drift from Hermetiq data:
 
-1. **Cross-user flag comparison**: Use ListInvocations filtered by different users over the
-   same `time_range`. Compare command-line arguments from GetInvocation. Differences in
-   `--define`, `--copt`, or `--action_env` values cause cache fragmentation.
-2. **CI versus local builds**: Filter ListInvocations by `role` or `host` to separate CI
-   builds from developer builds. CI builds often represent the intended configuration.
-3. **Branch-specific configuration**: Filter by `branch` to check whether feature branches use
+1. **Cross-user flag comparison**: Use `list_invocations` over one `lookback`, select returned
+   attempts from the users being compared, and inspect each with `get_invocation`. Differences
+   in `--define`, `--copt`, or `--action_env` values cause cache fragmentation.
+2. **CI versus local builds**: Select representative returned attempts by their user/host
+   evidence; these are result fields, not `list_invocations` filters. CI builds often represent
+   the intended configuration.
+3. **Branch-specific configuration**: Use the public `branch` filter to check whether feature branches use
    different build flags, such as debug versus optimized, that fragment the cache.
 4. **Platform fragmentation**: Check whether different `--platform_suffix` values or remote
    execution properties are in use. Each distinct platform creates a separate cache partition.
@@ -40,8 +42,8 @@ Signals of configuration drift:
 - `COMMAND_CHANGED` miss reason is a significant portion of total misses.
 - Cache hit rates vary significantly between users building the same targets.
 - Hit rates differ between CI and local builds.
-- Different `build_tool_version`, `platform_name`, or `cpu` values appear for the same logical
-  build across ListBuilds/ListInvocations results.
+- Different build-tool version, platform, or CPU values appear for the same logical build across
+  `list_builds`/`list_invocations` results.
 
 ## Hermeticity Flag Audit
 
@@ -62,10 +64,10 @@ These flags affect remote execution performance. Recommend values based on obser
 
 | Flag | What It Controls | How to Tune from Data |
 |------|-----------------|----------------------|
-| `--jobs=<N>` | Maximum concurrent actions | Compare to GetBuildParallelism peak. If parallelism plateaus below `--jobs`, the build graph is the bottleneck, not the job limit. If it hits `--jobs` consistently, increase it. Default for remote execution is 200. |
-| `--remote_timeout=<seconds>` | Per-action timeout for remote execution | Check slowest actions in GetRemoteExecutionAnalytics. Set to 2-3x the slowest expected action. Default 3600 seconds is usually sufficient. |
-| `--remote_retries=<N>` | Retry count for transient remote failures | Check action failure rates in GetGrpcHealth. If transient errors are common, increase from default 5. If errors are deterministic, retries waste time. |
-| `--remote_default_exec_properties` | Default platform properties for remote actions | Check GetSchedulerQueueHealth per-platform breakdown. Ensure properties match worker platforms that have capacity. |
+| `--jobs=<N>` | Maximum concurrent actions | Compare to `get_build_parallelism` peak. If parallelism plateaus below `--jobs`, the build graph is the bottleneck, not the job limit. If it hits `--jobs` consistently, increase it. Default for remote execution is 200. |
+| `--remote_timeout=<seconds>` | Per-action timeout for remote execution | Check slowest actions in `analyze_remote_execution`. Set to 2-3x the slowest expected action. Default 3600 seconds is usually sufficient. |
+| `--remote_retries=<N>` | Retry count for transient remote failures | Check action failure rates in `get_grpc_health`. If transient errors are common, increase from default 5. If errors are deterministic, retries waste time. |
+| `--remote_default_exec_properties` | Default platform properties for remote actions | Check `get_scheduler_health` per-platform breakdown. Ensure properties match worker platforms that have capacity. |
 
 ## Stamping Audit
 
@@ -77,7 +79,7 @@ How to detect stamping problems from Hermetiq data:
 
 1. Look for `workspace_status_command` in invocation command-line arguments.
 2. Check for `--stamp` or the absence of `--nostamp`.
-3. Look for `INPUT_CHANGED` misses where the diff shows `input_root_digest` changed but the
+3. Look for `INPUT_CHANGED` misses where the diff shows `inputRootDigest` changed but the
    user made no meaningful source change.
 4. Check whether cache miss patterns correlate with time-of-day rather than code changes.
 
@@ -93,7 +95,7 @@ How to detect toolchain drift:
 
 1. `COMMAND_CHANGED` miss reasons where the command diff shows a different compiler path or
    version string.
-2. Different `build_tool_version` values across users.
+2. Different `buildToolVersion` values across users.
 3. Cache hit rates that drop after toolchain updates and slowly recover.
 
 Recommendation: pin all toolchains via Bazel's toolchain resolution. Prefer hermetic toolchains
