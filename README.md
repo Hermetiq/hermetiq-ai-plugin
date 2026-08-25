@@ -76,6 +76,30 @@ Show me cache miss trends for the last 7 days
 Which targets are most expensive to execute remotely?
 ```
 
+### Canonical MCP workflow examples
+
+The plugin follows the official Hermetiq MCP catalog returned by `tools/list`.
+Tool names are lower snake case; generated protobuf names and old PascalCase
+aliases are not supported.
+
+| User request | Expected canonical sequence |
+|---|---|
+| "Which Hermetiq project should we inspect?" | `list_my_projects` |
+| "This opaque build URL is slow" | `resolve_build_or_invocation` → `get_build_details` → `get_invocation_insights` |
+| "Why did cache misses increase in this invocation?" | `group_cache_events` with `hit="miss"` → `find_cache_events` only when groups exist |
+| "Why did these actions fail?" | `find_actions` with `result="failed"` → `get_action_execution` for returned action IDs |
+| "Is Buildbarn healthy?" | `summarize_infrastructure_health` with `timeRange="1h"`, then a component tool only when the summary identifies an anomaly |
+
+Project scope comes from authentication and host selection; analytics tools do
+not accept a model-supplied project override. Optional capabilities are absent
+from `tools/list` when unavailable, and the skill will say so instead of
+substituting unrelated evidence.
+
+ConfigSet changes require a separate host-visible confirmation immediately
+before `import_config_map_yaml`, `save_config_set`, or
+`create_config_set_pull_request`. The skill never infers confirmation or retries
+an ambiguous mutation blindly.
+
 ## Install in Claude Desktop
 
 ### 1. Add the MCP server
@@ -162,4 +186,30 @@ Show cache miss reasons by mnemonic for my failing builds
 | `references/build-configuration.md` | Configuration drift, hermeticity, stamping, toolchain, and flag audit guidance |
 | `references/bazel-optimization.md` | Common Bazel flags and build graph anti-patterns |
 | `references/infrastructure-tuning.md` | Buildbarn storage, worker, scheduler, and scaling guidance |
-| `evals/evals.json` | Basic skill behavior eval prompts |
+| `evals/evals.json` | Skill behavior suite covering canonical selection, errors, disabled capabilities, and mutation safety |
+| `evals/canonical-mcp-catalog.json` | Release snapshot of canonical tools plus explicit prompt/resource/external-tool allowlists |
+| `scripts/validate-mcp-catalog.py` | Mechanical catalog-to-skill drift validator; pass `--server-catalog` to compare with the cloud-native fixture |
+
+## Developer validation
+
+Validate the skill, references, README, and eval sequences against the checked-in
+catalog and the authoritative server fixture:
+
+```bash
+python3 scripts/validate-mcp-catalog.py \
+  --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json
+python3 -m unittest scripts/test_validate_mcp_catalog.py -v
+```
+
+Run the real Claude/official-MCP canary suite with the API key and fixture IDs in
+the environment. The runner writes one raw/scored JSON artifact per case plus an
+aggregate `run.json`; it never writes the API key:
+
+```bash
+ANTHROPIC_API_KEY=... \
+BUILD_ID=... INVOCATION_ID=... FAILURE_INVOCATION_ID=... \
+CONFIG_SET_NAME=... REQUEST_ID=... \
+python3 scripts/run-mcp-evals.py \
+  --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json \
+  --output /tmp/hermetiq-skill-eval
+```
