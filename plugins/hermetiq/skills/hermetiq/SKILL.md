@@ -76,7 +76,12 @@ Two capability boundaries are hard rules:
   remote-execution, cache, parallelism, or invocation-detail calls merely to
   make the report more comprehensive.
 
-`analyze_buildbarn_storage` performs the rule-based live configuration audit.
+`analyze_buildbarn_storage` discovers which storage-related Buildbarn
+configuration files exist in the authorized namespace and flags secret-bearing
+keys. Per its own tool description it does **not** validate storage geometry or
+configuration correctness, and its `findings` array is frequently empty — a
+`status` of `files_discovered` with `findings: []` means "these files exist",
+not "this storage is healthy". Never report an empty `findings` as a clean audit.
 Its `knowledgeUri` can point at the `buildbarn://guides/storage-model` resource.
 When schema tools are present, prefer `get_buildbarn_config_field` for a known
 path, `search_buildbarn_config_schema` for discovery,
@@ -145,7 +150,10 @@ context and likewise are not tool calls.
 - Use `find_cache_events(includeMissAnalysis=true)` for actionable miss reasons.
   Reason strings are `NEVER_CACHED`, `INPUT_CHANGED`, `COMMAND_CHANGED`,
   `ENV_CHANGED`, `PLATFORM_CHANGED`, `CACHE_EVICTED`, `INSTANCE_MISMATCH`, and
-  `PLATFORM_SUFFIX_CHANGED`.
+  `PLATFORM_SUFFIX_CHANGED`. The two cache tools render these differently:
+  `summarize_cache_events` returns the bare form (`NEVER_CACHED`) while
+  `find_cache_events` returns the proto enum with its prefix
+  (`MISS_REASON_NEVER_CACHED`). Match on the suffix so both are handled.
 
 ## Intent to Tool Map
 
@@ -198,6 +206,19 @@ mnemonics, phases, or flags.
 
 - Rank by `estimatedSavings.percentOfWallTime` when present. If there is no
   numeric estimate, keep the insight but label the impact qualitative.
+- These field names belong to `get_invocation_insights`. The copy embedded in
+  `get_invocation` under `profile.insights` uses a different, older schema —
+  `id`, `category`, `potentialSavingsPercent`, `severity`, `confidence`,
+  `rationale` — and carries no `affectedItems`. Its `category` values are
+  lower-case and do not map one-to-one onto the pillars below (`parallelism`,
+  for instance, is not a pillar). Prefer the dedicated tool whenever you intend
+  to rank, group by pillar, or validate against `affectedItems`.
+- Savings estimates are not additive and are not cross-checked against each
+  other. Concurrent insights can each claim a large share of the same wall time,
+  and their sum can exceed 100% while a third insight asserts a floor that makes
+  both unreachable. Present the largest credible single win, reconcile the claims
+  against the invocation's actual wall time before quoting any total, and never
+  add two percentages together.
 - Group by pillar: `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, and
   `PROFILE_QUALITY`.
 - Surface caveats. They are part of the server-side confidence model.
@@ -277,9 +298,16 @@ for cross-build trends.
 | Execution | mnemonic-dependent | >2x median | >5x median | Slow action or resource contention |
 | Output upload | <5s | 5-20s | >20s | Large outputs or storage bottleneck |
 
-Use response fields by proto name: `stats`, `slowest_actions`,
-`expensive_targets`, `queue_wait_stats`, `io_hotspots`, `workers`,
-`cpu_efficiency_stats`, `cache_miss_candidates`, and `cache_summary`.
+Read response fields by their proto-JSON (camelCase) names, which is what the
+server emits: `stats`, `slowestActions`, `expensiveTargets`, `queueWaitStats`,
+`ioHotspots`, `workers`, `cpuEfficiencyStats`, `cacheMissCandidates`, and
+`cacheSummary`. The snake_case proto field names do not appear in tool output.
+Note `workerInfo` is returned empty alongside a populated `workers` — use
+`workers`.
+
+`expensiveTargets` ranks on accumulated action cost. When a deployment has no
+cost enrichment every row ties at zero, so treat a zero-cost `expensiveTargets`
+as unranked and use `slowestActions` and `stats` for the ordering instead.
 
 CPU efficiency:
 - >80%: good remote execution fit.
@@ -312,7 +340,7 @@ component is `warning` or `critical`, drill into its tool.
 | gRPC errors | `get_grpc_health` | status codes, error rate, latency | Investigate service/network failures |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence | Adjust limits or fix failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
-| Storage config suspicion | `analyze_buildbarn_storage` | validation errors, geometry/key-location-map issues, assessment | Run the Storage Configuration Audit playbook |
+| Storage config suspicion | `analyze_buildbarn_storage` | which storage config files exist, secret-bearing keys, any `findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
 | Config suspicion | `get_buildbarn_config` plus proto-intel tools | storage, scheduler, worker fields | Validate Jsonnet/proto settings |
 
 ### Cost Optimization
@@ -451,9 +479,13 @@ code bugs, flakes, or resource exhaustion.
 
 ### Storage Configuration Audit
 
-1. Call `analyze_buildbarn_storage` (optionally with `store`). It returns
-   per-store geometry and key-location-map facts, schema-validation errors, shard
-   topology, and rule-based issues with severities. If it is not registered, first
+1. Call `analyze_buildbarn_storage` (optionally with `store`) to establish which
+   storage configuration files the namespace actually has, plus any secret-bearing
+   keys and `findings` it reports. Treat this as scoping, not as the audit: it does
+   not return geometry, key-location-map sizing, shard topology, or
+   schema-validation errors, and `findings` is often empty. To audit anything you
+   still need the file contents — go on to `get_buildbarn_config` for each file it
+   named. If `analyze_buildbarn_storage` is not registered, first
    check whether `get_buildbarn_config` is present in tools/list; when it is, call
    `get_buildbarn_config(component="storage")` plus `component="frontend"`, interpret
    fields with the proto-intel tools, and read the `buildbarn://guides/storage-model`
