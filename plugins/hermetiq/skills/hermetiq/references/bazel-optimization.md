@@ -42,7 +42,7 @@ Platform configuration:
 When you see these in Hermetiq data, recommend specific fixes:
 
 1. **Mega-target**: A single target with hundreds of source files.
-   - Signal: One target appears repeatedly in `expensive_targets` or get_target_trends with high
+   - Signal: One target appears repeatedly in `data.expensiveTargets` or `get_target_trends` with high
      action count, cost, or duration.
    - Fix: Split into smaller libraries with narrower visibility.
 

@@ -13,7 +13,7 @@
   `branch`, `command`, and `status`. Do not construct protobuf filter or aggregation objects.
 - `get_invocation_insights` is invocation-scoped. It exposes the current typed recommendation
   schema for the same profile-derived action-plan surface that `get_invocation` also surfaces
-  under `invocation.profile.insights`, without loading the full invocation payload.
+  under `data.profile.insights`, without loading the full invocation payload.
 - `get_profile_trends` is project/time-window scoped. Use `lookback` (`"3d"`, `"7d"`, `"15d"`,
   or `"30d"`) and low-cardinality filters. Leave `forceRaw=false` for broad dashboards; use
   `forceRaw=true` only for narrow exact/debug reads.
@@ -143,12 +143,12 @@ Key fields:
   Prefer `get_invocation_insights` for the current typed insight schema when only the action plan
   is needed.
 
-`get_invocation_insights` returns typed `Insight` records:
+`get_invocation_insights` returns typed records under `data.insights`:
 - `insightId` — stable key for dedupe and per-rule links.
 - `pillar` — `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, or `PROFILE_QUALITY`.
 - `title`, `summary`, `recommendation` — user-facing copy.
-- `estimatedSavings.percentOfWallTime`, `estimatedSavings.micros`,
-  `estimatedSavings.human_readable` — rough savings projection; percent is the ranking key.
+- `estimatedSavings.percentOfWallTime`, `estimatedSavings.seconds`,
+  `estimatedSavings.humanReadable` — rough savings projection; percent is the ranking key.
 - `caveats` — uncertainty notes that must be surfaced with the recommendation.
 - `affectedItems` — typed pointers (`ACTION`, `TARGET`, `MNEMONIC`, `PHASE`, `FLAG`) with an
   optional metric label and duration. Use these to choose drill-down calls.
@@ -157,7 +157,7 @@ Insight workflow:
 1. Resolve the user's ID; if it is a build ID, choose the primary/latest invocation attempt from
    `get_build_details`.
 2. Call `get_invocation_insights(invocationId=...)`.
-3. Rank by `estimatedSavings.percentOfWallTime`, keeping qualitative insights when no
+3. Rank by `data.insights[].estimatedSavings.percentOfWallTime`, keeping qualitative insights when no
    numeric savings are available.
 4. Validate the top insights with the smallest underlying tool call: `find_actions`,
    `find_cache_events(includeMissAnalysis=true)`, `analyze_remote_execution`, or
@@ -170,7 +170,7 @@ Profile bottleneck glossary:
 |-------------------|------------|----------------------|
 | `process_bound` | Remote worker time is mostly spent running the action process itself. In Bazel terms, the command inside the sandbox, such as compiler, linker, test runner, or codegen tool, is the long pole rather than queueing, input fetch, cache checks, uploads, or output download. | Inspect related actions and mnemonics; split large targets, shard long tests, improve persistent workers, tune compiler/linker/test flags, or use larger workers only when resource signals show CPU or memory saturation. More workers usually will not shorten one serial action. |
 | `analysis_bound` | Bazel loading/analysis dominates before action execution. | Trim broad target patterns, reduce macro/rule analysis work, simplify dependency fanout, and investigate expensive repository or rule setup. |
-| `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `analyze_remote_execution.queue_wait_stats` and `get_scheduler_health`; scale or rebalance workers for the affected platform. |
+| `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `analyze_remote_execution.data.queueWaitStats` and `get_scheduler_health`; scale or rebalance workers for the affected platform. |
 | `fetch_bound` | Workers spend a large share fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker cache locality or virtual filesystem/prefetching, and check storage latency. |
 | `upload_bound` | Workers spend a large share uploading outputs. | Shrink outputs, avoid unnecessary declared outputs, and check storage upload health. |
 | `output_download_bound` | The Bazel client spends too much wall time downloading remote outputs. | Prefer `--remote_download_outputs=toplevel` or `minimal` where compatible and reduce top-level output volume. |
@@ -191,44 +191,45 @@ Profile bottleneck glossary:
 - These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
 ### CacheEventAgg (per-invocation)
-- `total_actions`, `hit_count`, `miss_count`, `hit_rate`
-- `by_mnemonic` — Per-action-type breakdown
-- `by_instance` — Per-cache-instance breakdown
-- `top_miss_targets` — Targets with most misses
-- `slowest_actions` — Highest cache lookup latency
-- `by_miss_reason` — Count per reason category
+- `data.totalActions`, `data.hitCount`, `data.missCount`, `data.hitRate`
+- `data.byMnemonic` — Per-action-type breakdown
+- `data.byInstance` — Per-cache-instance breakdown
+- `data.topMissTargets` — Targets with most misses
+- `data.slowestActions` — Highest cache lookup latency
+- `data.byMissReason` — Count per reason category
 
 ### CacheTrends (cross-build, time-windowed)
-- `summary` — Total lookups, hit rate, average latency over the period
-- `buckets` — Per-day hit rates and lookup volumes
-- `buckets.miss_reasons` — How miss reasons distribute over time
-- `mnemonic_day_heatmap` — Mnemonic × day hit rate grid
-- `top_miss_targets` — Targets with most misses over the period
+- `data.summary` — Total lookups, hit rate, average latency over the period
+- `data.buckets` — Per-day hit rates and lookup volumes
+- `data.buckets[].missReasons` — How miss reasons distribute over time
+- `data.mnemonicDayHeatmap` — Mnemonic × day hit rate grid
+- `data.topMissTargets` — Targets with most misses over the period
 
 ### RemoteExecutionAnalytics (per-invocation)
-- `total_cost`, `total_actions`, `total_execution_seconds`
-- `unique_workers`, `unique_mnemonics`, `avg_parallelism`
+Fields below are under `data` and use proto-JSON camelCase:
+- `totalCost`, `totalActions`, `totalExecutionSeconds`
+- `uniqueWorkers`, `uniqueMnemonics`, `avgParallelism`
 - `stats` — Per-mnemonic phase breakdown (queue/fetch/execute/upload)
-- `slowest_actions` — Top N by execution time
-- `expensive_targets` — Top N by total cost
-- `queue_wait_stats` — Per-mnemonic 50th/95th/99th percentile and max queue wait
-- `io_hotspots` — Actions with highest block I/O
+- `slowestActions` — Top N by execution time
+- `expensiveTargets` — Top N by total cost
+- `queueWaitStats` — Per-mnemonic 50th/95th/99th percentile and max queue wait
+- `ioHotspots` — Actions with highest block I/O
 - `workers` — Per-worker action count and cost
-- `cpu_efficiency_stats` — Per-mnemonic CPU utilization percentage
-- `cache_miss_candidates` — Actions executed multiple times (same digest)
-- `cache_summary` — Unique digests, repeated actions, potential savings
+- `cpuEfficiencyStats` — Per-mnemonic CPU utilization percentage
+- `cacheMissCandidates` — Actions executed multiple times (same digest)
+- `cacheSummary` — Unique digests, repeated actions, potential savings
 
 ### RemoteActionTrends (cross-build, time-windowed)
-- `summary` — Totals and period-over-period percentage changes for:
-  wall_time, action_count, cost, cpu_time, build_count
-- `buckets` — Action counts, costs, timing per day
-- `mnemonics` — Distribution of action types
-- `phase_breakdown` — Per-mnemonic average timing per phase
-- `slowest_actions` — Top 50 across all builds
-- `expensive_targets` — Top 50 across all builds
-- `io_hotspots` — Top 50 by block I/O
-- `cpu_efficiency` — Utilization percentage, user/system ratio, I/O-bound count
-- `fleet_utilization` — Daily unique workers, churn (new versus returning), average actions/worker
+- `data.summary` — Totals and period-over-period percentage changes for wall time,
+  action count, cost, CPU time, and build count
+- `data.buckets` — Action counts, costs, timing per day
+- `data.mnemonics` — Distribution of action types
+- `data.phaseBreakdown` — Per-mnemonic average timing per phase
+- `data.slowestActions` — Top 50 across all builds
+- `data.expensiveTargets` — Top 50 across all builds
+- `data.ioHotspots` — Top 50 by block I/O
+- `data.cpuEfficiency` — Utilization percentage, user/system ratio, I/O-bound count
+- `data.fleetUtilization` — Daily unique workers, churn (new versus returning), average actions/worker
 
 ### TargetTrends (cross-build, time-windowed)
 - `summary` — total target runs, distinct targets, distinct invocations, success/failure counts,
@@ -244,24 +245,24 @@ Use `get_profile_trends` for Bazel JSON trace profile questions across a project
 set. The public request supports `lookback`, `pattern`, `repository`, `branch`, `commands`,
 `users`, `statuses`, and `forceRaw`.
 
-Response fields:
-- `summary.total_builds` / `summary.builds_with_profile` — profile coverage. Low coverage means
+Response fields are under `data` and use proto-JSON camelCase:
+- `summary.totalBuilds` / `summary.buildsWithProfile` — profile coverage. Low coverage means
   profile conclusions are conditional.
-- `summary.avg_buildWallTimeMicros`, `avg_analysis_wall_micros`,
-  `avg_execution_wall_micros`, and `avg_action_total_micros` — build time anatomy and effective
+- `summary.avgBuildWallTimeMicros`, `avgAnalysisWallMicros`,
+  `avgExecutionWallMicros`, and `avgActionTotalMicros` — build time anatomy and effective
   action parallelism.
-- `summary.remote_queue_micros_sum`, `remote_fetch_micros_sum`,
-  `remote_process_micros_sum`, `remote_upload_micros_sum`,
-  `remote_output_download_micros_sum`, and `remote_cache_check_micros_sum` — remote phase mix.
-- `summary.top_bottleneckKind` / `summary.top_bottleneck_share` — dominant profile bottleneck
+- `summary.remoteQueueMicrosSum`, `remoteFetchMicrosSum`,
+  `remoteProcessMicrosSum`, `remoteUploadMicrosSum`,
+  `remoteOutputDownloadMicrosSum`, and `remoteCacheCheckMicrosSum` — remote phase mix.
+- `summary.topBottleneckKind` / `summary.topBottleneckShare` — dominant profile bottleneck
   classification over the selected window.
-- `summary.avg_peak_memory_mb`, `avg_peak_load`, `avg_gc_total_micros`, and
-  `major_gc_build_count` — client resource and Bazel JVM health.
-- `summary.skymeld_build_count`, `summary.skymeld_share`, and
-  `bazel_version_distribution` — build configuration drift and Skymeld adoption signals.
+- `summary.avgPeakMemoryMb`, `avgPeakLoad`, `avgGcTotalMicros`, and
+  `majorGcBuildCount` — client resource and Bazel JVM health.
+- `summary.skymeldBuildCount`, `summary.skymeldShare`, and
+  `bazelVersionDistribution` — build configuration drift and Skymeld adoption signals.
 - `buckets` — daily time series for charting build anatomy, remote phase mix, bottleneck movement,
   memory, GC, and Skymeld adoption.
-- `phase_trends`, `bottleneck_trends`, `resource_trends`, and `mnemonic_trends` — bounded
+- `phaseTrends`, `bottleneckTrends`, `resourceTrends`, and `mnemonicTrends` — bounded
   low-cardinality profile rollups. Use mnemonic trends to identify action classes, not individual
   targets.
 - `diagnostics` — precomputed MCP-friendly findings. Cite the diagnostic, then verify the
