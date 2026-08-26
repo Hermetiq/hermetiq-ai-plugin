@@ -44,6 +44,17 @@ protobuf names, PascalCase aliases, or a tool that is absent from the current
 catalog. If a user or old example gives a legacy name, translate the intent to
 the listed canonical tool; do not repeat the stale name in a call.
 
+Every successful structured tool result uses one envelope. Read domain fields
+from `data`, then inspect `truncated` before making any completeness-sensitive
+claim. When `truncated=true`, `truncatedFields` contains `$` JSON paths relative
+to `data`; narrow the next call when possible or state exactly what was cut.
+Tool-specific pagination and cap signals remain inside `data`, such as
+`data.nextCursor`, `data.invocationsTruncated`, or `data.insightsTruncated`.
+ConfigSet mutations return their `audit` and `retryGuidance` fields inside `data`.
+Tool errors use `isError=true` instead of a successful data envelope. All
+response paths in this skill are relative to `data` unless they explicitly name
+an envelope field.
+
 The catalog is deployment-aware:
 
 - Cache-event detail tools may be disabled. When present, start with
@@ -52,7 +63,7 @@ The catalog is deployment-aware:
   `analyze_buildbarn_storage`, and `list_worker_pools` appear only when the
   server has Kubernetes access.
 - `list_buildbarn_events` and `get_buildbarn_pod_logs` require VictoriaLogs.
-- `get_cost_summary` and `get_namespace_costs` are Cloud/OpenCost-only.
+- `get_cost_summary` is Cloud/OpenCost-only.
 - ConfigSet tools and Buildbarn schema tools are independently gated.
 
 Two capability boundaries are hard rules:
@@ -79,10 +90,11 @@ Two capability boundaries are hard rules:
 `analyze_buildbarn_storage` discovers which storage-related Buildbarn
 configuration files exist in the authorized namespace and flags secret-bearing
 keys. Per its own tool description it does **not** validate storage geometry or
-configuration correctness, and its `findings` array is frequently empty — a
-`status` of `files_discovered` with `findings: []` means "these files exist",
-not "this storage is healthy". Never report an empty `findings` as a clean audit.
-Its `knowledgeUri` can point at the `buildbarn://guides/storage-model` resource.
+configuration correctness, and `data.findings` is frequently empty — a
+`data.status` of `files_discovered` with `data.findings: []` means "these files
+exist", not "this storage is healthy". Never report empty findings as a clean
+audit. The separate `buildbarn://guides/storage-model` resource explains the
+storage model.
 When schema tools are present, prefer `get_buildbarn_config_field` for a known
 path, `search_buildbarn_config_schema` for discovery,
 `describe_buildbarn_config_type` for one type, and
@@ -143,17 +155,15 @@ context and likewise are not tool calls.
 - History tools use singular `command`; aggregated trend tools use `commands`,
   an array of at most 20 values.
 - Use `limit`/`offset` only when listed. `list_builds` uses the opaque
-  `nextCursor` returned by the server as the next `cursor`.
+  `data.nextCursor` returned by the server as the next `cursor`.
 - Field names are exact and case-sensitive. Common examples are
   `includeCommandLine`, `includeActionSummary`, `includeMissAnalysis`,
   `includeLogs`, `bucketSeconds`, and `forceRaw`.
 - Use `find_cache_events(includeMissAnalysis=true)` for actionable miss reasons.
   Reason strings are `NEVER_CACHED`, `INPUT_CHANGED`, `COMMAND_CHANGED`,
   `ENV_CHANGED`, `PLATFORM_CHANGED`, `CACHE_EVICTED`, `INSTANCE_MISMATCH`, and
-  `PLATFORM_SUFFIX_CHANGED`. The two cache tools render these differently:
-  `summarize_cache_events` returns the bare form (`NEVER_CACHED`) while
-  `find_cache_events` returns the proto enum with its prefix
-  (`MISS_REASON_NEVER_CACHED`). Match on the suffix so both are handled.
+  `PLATFORM_SUFFIX_CHANGED`. Both cache tools return this bare form; do not add
+  the protobuf `MISS_REASON_` prefix.
 
 ## Intent to Tool Map
 
@@ -169,7 +179,7 @@ context and likewise are not tool calls.
 | Profile trends or "where did time go?" | `get_profile_trends(lookback="7d")` | `get_critical_path_trends`, `get_remote_action_trends`, `get_cache_trends`, infra tools only when profile metrics point there |
 | Time-period comparison | `summarize_project_trends` | `get_remote_action_trends`, `get_cache_trends`, `get_target_trends` |
 | Infrastructure bottleneck | `summarize_infrastructure_health` | `get_scheduler_health`, `get_storage_health`, `get_worker_fleet_health`, `get_grpc_health` |
-| Cost reduction | `get_remote_action_trends(lookback="30d")` | `analyze_remote_execution`, `get_namespace_costs`, `get_cost_summary` |
+| Cost reduction | `get_remote_action_trends(lookback="30d")` | `analyze_remote_execution`, `get_cost_summary` |
 | Remote action detail | `group_remote_actions` | `find_remote_actions`, `get_remote_action_command` |
 | Target trends | `get_target_trends` | `get_target_trend_detail`, `list_targets` |
 | Filter discovery | `list_filter_values` | Use a supported `field`; patterns are intentionally not exposed for high-cardinality lookup |
@@ -199,15 +209,16 @@ Work in this order unless the user's question is narrower:
 ### Invocation Insights and Profile Metrics
 
 Use `get_invocation_insights` when the user asks what to change, how to make one
-build faster, or whether there is low-hanging fruit. Each insight includes:
+build faster, or whether there is low-hanging fruit. Each `data.insights[]`
+record includes:
 `insightId`, `pillar`, `title`, `summary`, `recommendation`,
 `estimatedSavings`, `caveats`, and typed `affectedItems` for actions, targets,
 mnemonics, phases, or flags.
 
-- Rank by `estimatedSavings.percentOfWallTime` when present. If there is no
+- Rank by `data.insights[].estimatedSavings.percentOfWallTime` when present. If there is no
   numeric estimate, keep the insight but label the impact qualitative.
 - These field names belong to `get_invocation_insights`. The copy embedded in
-  `get_invocation` under `profile.insights` uses a different, older schema —
+  `get_invocation` under `data.profile.insights` uses a different, older schema —
   `id`, `category`, `potentialSavingsPercent`, `severity`, `confidence`,
   `rationale` — and carries no `affectedItems`. Its `category` values are
   lower-case and do not map one-to-one onto the pillars below (`parallelism`,
@@ -240,8 +251,8 @@ trace profiles. Default to `lookback="7d"` unless the user asks otherwise.
 Supported dashboard windows include `"3d"`, `"7d"`, `"15d"`, and `"30d"`.
 Leave `forceRaw=false` for broad dashboards so hourly rollups can be used; set
 `forceRaw=true` only for narrow exact/debug reads. Always cite
-`buildsWithProfile / totalBuilds` as profile coverage, and mention
-`usedRollups` when exactness matters.
+`data.summary.buildsWithProfile / data.summary.totalBuilds` as profile coverage,
+and mention `data.usedRollups` when exactness matters.
 
 Interpret profile bottleneck labels as follows:
 
@@ -278,7 +289,7 @@ Miss reason guidance:
 | `PLATFORM_CHANGED` | Execution platform properties changed | Standardize platforms and remote execution properties |
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
-| `CACHE_EVICTED` | Storage too small or retention too short | Check `get_storage_health` eviction age |
+| `CACHE_EVICTED` | Storage too small or retention too short | Ask for verified retention/eviction metrics; `get_storage_health` does not expose eviction age |
 | `NEVER_CACHED` | First observed action | Usually expected for new code or targets |
 
 If `INPUT_CHANGED` dominates for one mnemonic or target, call
@@ -298,8 +309,8 @@ for cross-build trends.
 | Execution | mnemonic-dependent | >2x median | >5x median | Slow action or resource contention |
 | Output upload | <5s | 5-20s | >20s | Large outputs or storage bottleneck |
 
-Read response fields by their proto-JSON (camelCase) names, which is what the
-server emits: `stats`, `slowestActions`, `expensiveTargets`, `queueWaitStats`,
+Read response fields under `data` by their proto-JSON (camelCase) names, which
+is what the server emits: `stats`, `slowestActions`, `expensiveTargets`, `queueWaitStats`,
 `ioHotspots`, `workers`, `cpuEfficiencyStats`, `cacheMissCandidates`, and
 `cacheSummary`. The snake_case proto field names do not appear in tool output.
 Note `workerInfo` is returned empty alongside a populated `workers` — use
@@ -313,7 +324,7 @@ CPU efficiency:
 - >80%: good remote execution fit.
 - 40-80%: mixed; inspect I/O and memory pressure.
 - <40%: likely I/O-bound; consider local execution if local parallelism allows.
-- High `io_bound_count`: candidates for local execution or input/output reduction.
+- High `data.cpuEfficiencyStats[].ioBoundCount`: candidates for local execution or input/output reduction.
 
 ### Parallelism and Critical Path
 
@@ -335,23 +346,23 @@ component is `warning` or `critical`, drill into its tool.
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
 | High queue time | `get_scheduler_health` | queue wait p90/p99, per-platform depth | Scale or rebalance workers |
-| Slow fetch/upload | `get_storage_health` | operation latency, error rate, eviction age | Fix storage latency or retention |
+| Storage load | `get_storage_health` | `data.status`, `data.metrics[].labels`, `data.metrics[].value` | Correlate operation rate with the build window; request detailed latency/retention metrics before sizing |
 | Worker resource pressure | `get_worker_fleet_health` | CPU, memory, block I/O, stage timing | Tune worker size or concurrency |
 | gRPC errors | `get_grpc_health` | status codes, error rate, latency | Investigate service/network failures |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence | Adjust limits or fix failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
-| Storage config suspicion | `analyze_buildbarn_storage` | which storage config files exist, secret-bearing keys, any `findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
+| Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, secret-bearing keys, and `data.findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
 | Config suspicion | `get_buildbarn_config` plus proto-intel tools | storage, scheduler, worker fields | Validate Jsonnet/proto settings |
 
 ### Cost Optimization
 
-Use `get_remote_action_trends`, `analyze_remote_execution`, `get_namespace_costs`,
-and `get_cost_summary`. Prioritize:
+Use `get_remote_action_trends`, `analyze_remote_execution`, and
+`get_cost_summary`. Prioritize:
 
 1. Improve cache hit rate: every hit avoids remote execution.
 2. Move poor remote-fit, I/O-bound actions local when parallelism permits.
 3. Right-size workers using fleet utilization and queue metrics.
-4. Optimize the top `expensive_targets` and `slowest_actions`.
+4. Optimize the top `data.expensiveTargets` and `data.slowestActions`.
 5. Use lower-cost capacity where reliability permits.
 
 Only calculate savings when required inputs are present, such as `missCount`,
@@ -421,8 +432,9 @@ For remote actions that fail because they executed in the wrong userspace. The t
 dynamic loader or exec error instead of a compiler/test diagnostic. Do not report these as
 code bugs, flakes, or resource exhaustion.
 
-1. Fix the failure class. `get_invocation` — record `exit_code`, `exit_code_name`, and
-   `failure_message`. A message like "`<Mnemonic>` returned a non-zero exit code when
+1. Fix the failure class. `get_invocation` — record `data.invocation.exitCode`,
+   `data.invocation.exitCodeName`, and `data.invocation.failureMessage`. A message like
+   "`<Mnemonic>` returned a non-zero exit code when
    running remotely" points at the environment, not the build graph.
 2. Partition failed against passed. This is the discriminating step. Call
    `find_remote_actions(result="failed")` and again with `result="success"`, and
@@ -440,7 +452,8 @@ code bugs, flakes, or resource exhaustion.
    remote actions. Many pods of one pool means a pool-wide image or config problem; a single
    pod means node-level drift — check `list_buildbarn_events` and `get_buildbarn_pod_logs` for it.
 4. Establish what was requested, and whether the failing tool is hermetic. Take a failed
-   action digest and call `get_remote_action_command`. Record `platform.properties`
+   action digest and call `get_remote_action_command`. Record
+   `data.command.platform.properties`
    (especially `container-image`) and the failing executable's path. A path under
    `external/` means Bazel staged that binary from the repository's toolchain pin, so the
    toolchain — not the image — supplied it. An absolute path such as `/usr/bin/gcc` means
@@ -480,8 +493,8 @@ code bugs, flakes, or resource exhaustion.
 ### Storage Configuration Audit
 
 1. Call `analyze_buildbarn_storage` (optionally with `store`) to establish which
-   storage configuration files the namespace actually has, plus any secret-bearing
-   keys and `findings` it reports. Treat this as scoping, not as the audit: it does
+   storage configuration files `data.configurationFiles` names, plus any secret-bearing
+   keys and `data.findings` it reports. Treat this as scoping, not as the audit: it does
    not return geometry, key-location-map sizing, shard topology, or
    schema-validation errors, and `findings` is often empty. To audit anything you
    still need the file contents — go on to `get_buildbarn_config` for each file it
@@ -496,10 +509,10 @@ code bugs, flakes, or resource exhaustion.
    ConfigSet and describe it as active. Without one of those sources, stop and
    report that active configuration access is unavailable.
 2. Corroborate with `get_storage_health(timeRange="24h")` or the user's
-   supported window: `evictionAgeHours`
-   (critical below 1 hour, degraded below 4), `hash_table` saturation rates (any
-   sustained nonzero rate means the key-location map is undersized), latencies, and
-   error rates. Note the saturation counters reset on restart.
+   supported window. Read the returned `data.status` and `data.metrics[]`
+   (`name`, `labels`, and `value`); the current tool exposes operation telemetry,
+   not eviction-age, disk-health, or key-location-map saturation fields. Ask the
+   operator for those measurements before making retention or hash-table claims.
 3. For stores on raw block devices the config cannot reveal the device size — ask
    the operator for the device or PVC size, then finish the arithmetic
    (block size = device bytes / total blocks; one block is the largest storable blob).
@@ -534,6 +547,8 @@ code bugs, flakes, or resource exhaustion.
 - After confirmation, pass a unique `requestId`, the approved `reason`, and the
   exact reviewed payload. Do not put secrets in Jsonnet, YAML, `extVars`, or
   metadata.
+- After a successful mutation, report `data.audit` and follow
+  `data.retryGuidance` if later verification is ambiguous.
 - Never blindly retry a mutation after a timeout or ambiguous failure. Read the
   latest ConfigSet/version/history first; for pull requests, ask the host to
   search the Git service for the branch or request before any retry.

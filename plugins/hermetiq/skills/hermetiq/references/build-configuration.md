@@ -6,10 +6,11 @@ configuration from Hermetiq telemetry and recommend improvements.
 ## Detecting Configuration from Invocation Data
 
 Use `list_invocations(lookback="7d")` or a user-requested supported window to select
-representative attempts, then call
+representative attempts from `data.invocations[]`, then call
 `get_invocation(invocationId=..., includeCommandLine=true)` to inspect effective
-configuration. If the user gives an opaque ID, call `resolve_build_or_invocation` first and
-use the returned invocation ID for invocation-level configuration checks.
+configuration under `data.invocation` and `data.commandLine`. If the user gives
+an opaque ID, call `resolve_build_or_invocation` first and use the returned
+`data.invocationId` for invocation-level configuration checks.
 
 - **Command-line flags**: Look for `--define`, `--copt`, `--action_env`,
   `--platform_suffix`, `--stamp`/`--nostamp`, `--incompatible_strict_action_env`,

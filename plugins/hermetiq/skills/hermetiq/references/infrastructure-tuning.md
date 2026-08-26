@@ -27,18 +27,18 @@ discarded whole. A fixed-size open-addressed hash table (the **key-location map*
 blob locations and never grows.
 
 **`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter):
-the structured `data` contains CAS/Action Cache operation rates, latency percentiles,
-error rate, blob-size percentiles, disk health, hash-table saturation, eviction, and
-assessment fields using proto-JSON lowerCamelCase names. Cache misses and expected status
-codes are not storage errors.
+the structured payload exposes `data.projectId`, `data.start`, `data.end`, `data.status`,
+and `data.metrics[]`. Each metric row has `name`, `labels`, and `value`; the current query
+reports operation telemetry. It does not expose disk health, eviction age, blob-size
+percentiles, or key-location-map saturation, so obtain those measurements from the operator
+or another verified source before using the sizing guidance below.
 
 **How to assess if storage is undersized**:
-1. `get_storage_health`: `data.diskHealth.evictionAgeHours` — the age of the youngest data ever
-   evicted, i.e. how long a blob is guaranteed to survive. The server assesses **critical
-   below 1 hour** and **degraded below 4 hours**; keep it comfortably above your longest
-   build (the chart's `BuildbarnCacheRetentionLow` alert fires below 24 hours).
+1. Operator-supplied eviction age — the age of the youngest data ever evicted, i.e. how long
+   a blob is guaranteed to survive. Keep it comfortably above the longest build and use the
+   deployment's alert thresholds when classifying severity.
 2. `get_cache_trends`: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
-3. `get_storage_health`: hash-table **saturation rates** (not counts) — any sustained nonzero
+3. Operator-supplied hash-table **saturation rates** (not counts) — any sustained nonzero
    `putTooManyIterationsRate` or `getTooManyAttemptsRate` means the key-location map
    is silently dropping index entries; blobs stay on disk but become unreachable. These
    counters reset on restart, so a quiet dashboard right after a deploy proves nothing.
@@ -55,7 +55,7 @@ codes are not storage errors.
 | High FindMissing rates | Clients re-checking existence | Enable existence caching on frontend |
 
 **Key-location map sizing**: aim for **2-10x the expected live object count**
-(`usable bytes / average blob size`; measure blob sizes from `get_storage_health`).
+(`usable bytes / average blob size`; obtain a measured blob-size distribution from the operator).
 In-memory maps cost ~64 bytes per entry of eagerly allocated heap;
 on-disk maps ~66 bytes per record. **The map and the blocks are coupled: growing the disk
 without growing the map makes eviction worse, not better.**
@@ -204,8 +204,10 @@ When builds get slower and the cause is not cache-related or code-related:
 
 1. **Timeline correlation**: `summarize_infrastructure_health` for a slow build. Compare to the same
    tool for a recent fast build of the same targets.
-2. **Storage**: `get_storage_health` → Is eviction age dropping? Are latencies up? Error rates?
-3. **Workers**: `get_worker_fleet_health` → CPU/memory spiking? Execution stage timings changing?
+2. **Storage**: `get_storage_health` → Did labeled operation rate change in the build window?
+   Obtain separate verified eviction, latency, and error measurements before drawing those conclusions.
+3. **Workers**: `get_worker_fleet_health` → Did labeled worker operation rate change?
+   Obtain separate verified CPU, memory, and stage-timing measurements before drawing those conclusions.
    Use `list_buildbarn_events` for out-of-memory kills during the build window when listed.
 4. **Scheduler**: `get_scheduler_health` → Queue depth growing? Specific platforms backed up?
 5. **Network**: `get_grpc_health` → Error rates or latencies elevated between components?
