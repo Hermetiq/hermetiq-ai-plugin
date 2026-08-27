@@ -162,7 +162,18 @@ Insight workflow:
 4. Validate the top insights with the smallest underlying tool call: `find_actions`,
    `find_cache_events(includeMissAnalysis=true)`, `analyze_remote_execution`, or
    `get_build_parallelism`.
-5. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
+5. For a remote-capacity claim, first confirm remote execution and
+   `data.completedActionLogEnabled`. Compare only executing remote-action
+   concurrency with a complete last-wins numeric `--jobs`; the scheduler executing
+   gauge, participating workers, worker slots, and replicas are different quantities.
+   Treat a padded scheduler window as shared corroboration and require time-aligned
+   desired/available/ready replica or scale-event history to prove autoscaler delay.
+   When listed, `get_worker_scaling_timeline` is the canonical historical replica
+   view; absent/incomplete series or unavailable scale events preserve the
+   hypothesis. When `data.scaleEventsStatus` is `available_separately`, use
+   `list_buildbarn_events` with the same invocation window when listed, while
+   treating timestamp alignment as correlation rather than event-to-replica causality.
+6. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
 
 Profile bottleneck glossary:
 
@@ -191,12 +202,13 @@ Profile bottleneck glossary:
 - These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
 ### CacheEventAgg (per-invocation)
-- `data.totalActions`, `data.hitCount`, `data.missCount`, `data.hitRate`
-- `data.byMnemonic` — Per-action-type breakdown
-- `data.byInstance` — Per-cache-instance breakdown
-- `data.topMissTargets` — Targets with most misses
-- `data.slowestActions` — Highest cache lookup latency
-- `data.byMissReason` — Count per reason category
+- `data.aggregations.totalActions`, `data.aggregations.hitCount`,
+  `data.aggregations.missCount`, `data.aggregations.hitRate`
+- `data.aggregations.byMnemonic` — Per-action-type breakdown
+- `data.aggregations.byInstance` — Per-cache-instance breakdown
+- `data.aggregations.topMissTargets` — Targets with most misses
+- `data.aggregations.slowestActions` — Highest cache lookup latency
+- `data.aggregations.byMissReason` — Count per reason category
 
 ### CacheTrends (cross-build, time-windowed)
 - `data.summary` — Total lookups, hit rate, average latency over the period
@@ -455,8 +467,8 @@ collection:
   per record, with the record count automatically rounded down to a prime (no need to
   pre-compute primes).
 - An undersized map fails **silently**: inserts displace older entries and eventually drop,
-  so blob bytes stay on disk but become unreachable. Watch the `hash_table` saturation rates
-  in get_storage_health. **The map and the blocks are coupled** — growing the disk without
+  so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`,
+  `hash_put_too_many_iterations`, and `hash_put_ignored_invalid` rows in `get_storage_health`. **The map and the blocks are coupled** — growing the disk without
   growing the map makes eviction worse.
 - Can be stored in-memory (faster, lost on restart) or on block device (persistent).
 
@@ -625,8 +637,9 @@ operator-supplied fact and label it as such.
 
 Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
 message limits, worker concurrency) drift per deployment and per release — do not quote
-remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (derived geometry,
-capacity, and findings) or `get_buildbarn_config` (raw jsonnet), and correlate with
+remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (a file index and secret scan only,
+not geometry) without a store filter, followed by `get_buildbarn_config` (raw jsonnet).
+Identify CAS, AC, ISCC, and FSAC from configuration content rather than filenames, then correlate with
 `get_storage_health` / `get_worker_fleet_health` / `get_scheduler_health` before recommending
 changes.
 

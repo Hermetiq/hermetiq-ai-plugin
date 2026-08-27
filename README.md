@@ -86,13 +86,17 @@ aliases are not supported.
 |---|---|
 | "Which Hermetiq project should we inspect?" | `list_my_projects` |
 | "This opaque build URL is slow" | `resolve_build_or_invocation` → `get_build_details` → `get_invocation_insights` |
+| "Analyze this known invocation" | `analyze_invocation` prompt: `get_invocation(includeCommandLine=true)` → `get_invocation_insights` → `summarize_cache_events` when available; when remote execution is enabled, check `get_project.data.completedActionLogEnabled`, use `analyze_remote_execution` → `get_build_parallelism(bucketSeconds=5)` only when action logging is on, compare only executing remote-action concurrency with a complete last-wins numeric `--jobs`, treat the padded/shared `get_scheduler_health` window as corroboration rather than worker slots or replicas, require `get_worker_scaling_timeline`'s time-aligned desired/available/ready series when listed before claiming autoscaler delay, and follow `available_separately` with same-window `list_buildbarn_events` without inferring causality from timestamp alignment |
 | "Why did cache misses increase in this invocation?" | `group_cache_events` with `hit="miss"` → `find_cache_events` only when groups exist |
 | "Why did these actions fail?" | `find_actions` with `result="failed"` → `get_action_execution` for returned action IDs |
 | "Is Buildbarn healthy?" | `summarize_infrastructure_health` with `timeRange="1h"`, then a component tool only when the summary identifies an anomaly |
+| "Audit Buildbarn storage configuration" | `analyze_buildbarn_storage` without a store filter → `get_buildbarn_config` for discovered files; identify CAS/AC/ISCC/FSAC from configuration content before applying a store focus, then use `get_storage_health` only as corroborating runtime telemetry |
 
-Project scope comes from authentication and host selection; analytics tools do
-not accept a model-supplied project override. Optional capabilities are absent
-from `tools/list` when unavailable, and the skill will say so instead of
+Project scope comes from the server-resolved default or the user's sticky
+`select_project` preference; analytics tools do not accept a model-supplied
+project override. The skill uses the current project without prompting and
+switches only when the user explicitly requests it. Optional capabilities are
+absent from `tools/list` when unavailable, and the skill will say so instead of
 substituting unrelated evidence.
 
 ConfigSet changes require a separate host-visible confirmation immediately
@@ -208,6 +212,7 @@ aggregate `run.json`; it never writes the API key:
 ```bash
 ANTHROPIC_API_KEY=... \
 BUILD_ID=... INVOCATION_ID=... FAILURE_INVOCATION_ID=... \
+REMOTE_EXEC_INVOCATION_ID=... LOCAL_INVOCATION_ID=... \
 CONFIG_SET_NAME=... REQUEST_ID=... \
 python3 scripts/run-mcp-evals.py \
   --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json \

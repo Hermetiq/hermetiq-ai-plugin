@@ -9,10 +9,15 @@ Jsonnet/ConfigMap content before making config-specific recommendations.
 
 ## Storage Tuning
 
-Prefer `analyze_buildbarn_storage` when it is registered (requires Kubernetes access): it
-evaluates the live storage/frontend jsonnet, validates it against the bb-storage schema,
-derives block geometry and key-location-map facts, and returns rule-based findings with
-severities. If it is absent, use `get_buildbarn_config` only when that tool is also present
+Use `analyze_buildbarn_storage` when it is registered (requires Kubernetes access) to
+**discover which config files exist** and flag secret-bearing keys. It does not validate
+storage geometry or configuration correctness — its own description says so, and it commonly
+returns `findings: []` for a perfectly ordinary deployment. Treat it as a file index, then
+read the files it names with `get_buildbarn_config(component=...)` and do the geometry
+yourself. Run discovery without a `store` filename filter, then identify CAS, AC, ISCC, and
+FSAC stores from the returned configuration content. A filename substring or requested store
+label is not evidence of the configured store type; apply that focus only after mapping the
+content. If it is absent, use `get_buildbarn_config` only when that tool is also present
 in tools/list; otherwise ask the operator for the storage/frontend/common ConfigMap Jsonnet
 or use ConfigSets tools when present, and label the result as config-supplied rather than
 live-cluster verified. The underlying model lives in the MCP resource
@@ -26,20 +31,58 @@ eviction — when the oldest new block fills, the ranges rotate and the oldest o
 discarded whole. A fixed-size open-addressed hash table (the **key-location map**) indexes
 blob locations and never grows.
 
-**`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter):
-the structured payload exposes `data.projectId`, `data.start`, `data.end`, `data.status`,
-and `data.metrics[]`. Each metric row has `name`, `labels`, and `value`; the current query
-reports operation telemetry. It does not expose disk health, eviction age, blob-size
-percentiles, or key-location-map saturation, so obtain those measurements from the operator
-or another verified source before using the sizing guidance below.
+**`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter;
+omit it to get both). The payload exposes `data.projectId`, `data.start`, `data.end`,
+`data.status`, `data.assessment`, and `data.metrics[]`. Each metric row carries `name`,
+`labels`, `value`, `unit`, and `aggregation`.
+
+`data.assessment` is `healthy`, `degraded`, `critical`, or `no_data`, computed server-side
+from eviction age, CAS error rate, and key-location-map pressure. Report it, but always cite
+the underlying metric that drove it rather than the verdict alone.
+
+**Never compare two metrics with different `aggregation` values.** `peak` is the highest
+1-minute rate in the window, `average` is the mean over it, `instant` is a gauge read at the
+window end, and `derived` is computed from other rows. A `peak` operation rate sits beside an
+`average` latency in the same payload and the two are not on the same scale.
+
+Metric names, per storage type (`cas_` / `ac_` prefix; `operation_rate` alone covers both):
+
+| Metric | Unit | Meaning |
+|--------|------|---------|
+| `operation_rate`, `<type>_operation_rate` | ops/sec, peak | Blob-access operations |
+| `<type>_operations_by_op` | ops/sec, peak | Same, split by `labels.operation` (Get, Put, FindMissing) |
+| `<type>_latency_{get,put,findmissing}_{p50,p90,p99}` | ms, average | Per-operation latency |
+| `<type>_error_rate_pct` | percent, derived | Excludes NotFound, Canceled, AlreadyExists — a NotFound on a CAS read is a cache miss, not a failure |
+| `<type>_operation_count`, `<type>_error_count` | ops/sec, average | The numerator and denominator behind the rate |
+| `cas_blob_size_{p50,p90,p99}` | bytes, average | CAS only; the AC stores fixed-shape messages |
+| `eviction_age` | hours, instant | Raw `min()` across the eviction-age rule |
+| `eviction_age_by_shard` | hours, instant | Per shard, in `labels.kubernetes_shard` |
+| `eviction_age_min_shard` | hours, derived | **The value the assessment uses** |
+| `hash_{get_too_many_attempts,put_too_many_iterations,put_ignored_invalid}` | ops/sec, peak | Key-location-map saturation |
+| `eviction_set_ops` | per hour, instant | Eviction-set activity by service and cache name |
+
+Two reading caveats:
+
+- **Prefer `eviction_age_min_shard` over `eviction_age`.** The recording rule can carry
+  series with no `kubernetes_shard` label, and `min()` will happily return one. On a live
+  cluster a shardless series read 8 minutes while every real shard read 67 to 107 hours.
+  Only shard-labeled series describe a shard, which is what actually bounds retention.
+- **Sanity-check the blob-size percentiles.** They come from `histogram_quantile` over
+  averaged bucket rates, so coarse buckets inflate them. A p50 in the tens of megabytes is a
+  bucket artifact, not a typical Bazel blob. Say so rather than sizing against it.
+- **Breakdown metrics omit zero-valued rows.** `<type>_operations_by_op`, `eviction_set_ops`,
+  `server_handled`, `top_codes`, `completed_by_code`, `platform_breakdown`, and
+  `service_breakdown` return only series that actually fired. An absent row means that
+  combination never occurred in the window, not that telemetry is missing. Single unlabeled
+  gauges keep their zeros, because there zero is the answer.
 
 **How to assess if storage is undersized**:
-1. Operator-supplied eviction age — the age of the youngest data ever evicted, i.e. how long
-   a blob is guaranteed to survive. Keep it comfortably above the longest build and use the
+1. `eviction_age_min_shard` — the age of the youngest data ever evicted, i.e. how long a blob
+   is guaranteed to survive. Keep it comfortably above the longest build and use the
    deployment's alert thresholds when classifying severity.
 2. `get_cache_trends`: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
-3. Operator-supplied hash-table **saturation rates** (not counts) — any sustained nonzero
-   `putTooManyIterationsRate` or `getTooManyAttemptsRate` means the key-location map
+3. Hash-table **saturation rates** (not counts) — any sustained nonzero
+   `hash_put_too_many_iterations` or `hash_get_too_many_attempts` means the key-location map
    is silently dropping index entries; blobs stay on disk but become unreachable. These
    counters reset on restart, so a quiet dashboard right after a deploy proves nothing.
 
@@ -55,7 +98,8 @@ or another verified source before using the sizing guidance below.
 | High FindMissing rates | Clients re-checking existence | Enable existence caching on frontend |
 
 **Key-location map sizing**: aim for **2-10x the expected live object count**
-(`usable bytes / average blob size`; obtain a measured blob-size distribution from the operator).
+(`usable bytes / average blob size`; read the distribution from `cas_blob_size_p50`, subject
+to the bucket-artifact caveat above).
 In-memory maps cost ~64 bytes per entry of eagerly allocated heap;
 on-disk maps ~66 bytes per record. **The map and the blocks are coupled: growing the disk
 without growing the map makes eviction worse, not better.**
@@ -196,6 +240,58 @@ per action type, using an Initial Size Class Cache. Routes small compilations to
 **Signal this could help**: High cost variance within the same mnemonic — actions that finish
 in 2 seconds on a large worker but 30 seconds on a small one.
 
+### Autoscaling and Capacity Arrival
+
+Diagnose capacity arrival from time-aligned evidence rather than from one peak.
+For a known invocation with remote execution enabled:
+
+1. Read a complete command line with `get_invocation(includeCommandLine=true)`
+   and extract the last effective numeric `--jobs` value. `--jobs` is a client
+   ceiling, not worker capacity.
+2. Call `get_project` and read `data.completedActionLogEnabled`. If it is false,
+   remote-action details and parallelism are unavailable; skip the next two
+   action-data steps and do not interpret missing rows as zero.
+3. Use `analyze_remote_execution` for invocation-owned queue totals,
+   `queueWaitStats`, phase timing, and worker participation.
+4. Use `get_build_parallelism(bucketSeconds=5)` for the executing remote-action
+   ramp. It does not count queued/runnable work, replicas, or available slots.
+5. Use `get_scheduler_health(invocationId=...)` when listed. Its padded project
+   window may include other activity, so label it shared corroborating evidence
+   rather than invocation-owned data. Its scheduler `executing` gauge is not the
+   remote-action concurrency series and is not a count of worker slots or replicas.
+   Compare only the remote-action concurrency series against a numeric `--jobs`.
+6. Use `get_worker_scaling_timeline(invocationId=...)` when listed. Align its
+   desired, available, and ready replica series with the invocation-owned queue
+   and concurrency timeline. Missing or incomplete series leave slow autoscaling
+   unproven; an explicit scale-events-unavailable field is a coverage caveat,
+   not evidence that no scale event occurred. When `data.scaleEventsStatus` is
+   `available_separately` and `list_buildbarn_events` is listed, call it with the
+   same `invocationId` so both tools use the same padded window. Correlate event
+   and replica timestamps, but do not infer event-to-replica causality from
+   timestamp alignment alone.
+
+| Pattern | Supported conclusion |
+|---------|----------------------|
+| Low executing parallelism + low queueing | Graph, lack of ready remote work, or a long action is likely limiting |
+| Low executing parallelism + high queue duration/depth | Scheduler/worker capacity is likely limiting; the scheduler executing gauge corroborates activity but does not quantify slots |
+| Long initial queue + fixed low concurrency plateau + later stepwise ramp | Capacity arrived late; slow autoscaling is plausible |
+| One worker handles most actions while several others handle only a small tail | Later worker participation supports the late-capacity hypothesis |
+
+The last two patterns do not prove autoscaler behavior. `list_worker_pools` is a
+live desired/available snapshot, and remote-action worker rows show participation
+only. `get_worker_scaling_timeline` is the preferred historical replica view when
+listed. Require its time-aligned desired/available/ready series, or an equivalent
+controller scale-event timeline, to show capacity arriving after queue growth
+before stating that an autoscaler reacted slowly. If that history is unavailable,
+keep capacity arrival as a hypothesis and recommend instrumenting the scale
+decision, pod scheduling, image pull, and readiness timeline separately.
+
+Keep causality partitioned in the report: Action Cache misses explain why work
+had to execute, queue metrics explain delay before execution, and execution
+duration explains action cost. A cold cache can increase demand without proving
+that it caused scheduler delay, and scheduler delay does not make actions slow
+once they start.
+
 ---
 
 ## Diagnosing Infrastructure-Related Build Regressions
@@ -204,10 +300,13 @@ When builds get slower and the cause is not cache-related or code-related:
 
 1. **Timeline correlation**: `summarize_infrastructure_health` for a slow build. Compare to the same
    tool for a recent fast build of the same targets.
-2. **Storage**: `get_storage_health` → Did labeled operation rate change in the build window?
-   Obtain separate verified eviction, latency, and error measurements before drawing those conclusions.
-3. **Workers**: `get_worker_fleet_health` → Did labeled worker operation rate change?
-   Obtain separate verified CPU, memory, and stage-timing measurements before drawing those conclusions.
+2. **Storage**: `get_storage_health` → Compare `data.assessment` between the two windows,
+   then the metric that moved: operation rate, the latency percentiles, `cas_error_rate_pct`,
+   or `eviction_age_min_shard`. Latency is an `average` and operation rate a `peak`; read each
+   against its own counterpart in the other window, never against each other.
+3. **Workers**: `get_worker_fleet_health` → Compare `data.assessment`, then
+   `execution_stage_{p50,p90,p99}` for stage timing and the `rss_p90`, `cpu_*_p90`,
+   `block_io_*_p90`, and `file*_p90` rows for resource ceilings.
    Use `list_buildbarn_events` for out-of-memory kills during the build window when listed.
 4. **Scheduler**: `get_scheduler_health` → Queue depth growing? Specific platforms backed up?
 5. **Network**: `get_grpc_health` → Error rates or latencies elevated between components?

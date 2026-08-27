@@ -57,11 +57,16 @@ an envelope field.
 
 The catalog is deployment-aware:
 
+- `select_project` requires shared storage for the selection, so it is absent in
+  deployments without it. When absent, use the server-resolved project and
+  report that project switching is unavailable only if the user asks to switch.
 - Cache-event detail tools may be disabled. When present, start with
   `group_cache_events`, then call `find_cache_events` only if groups exist.
 - Kubernetes-backed tools such as `get_buildbarn_config`,
   `analyze_buildbarn_storage`, and `list_worker_pools` appear only when the
-  server has Kubernetes access.
+  server has Kubernetes access. `get_worker_scaling_timeline` additionally
+  requires infrastructure metrics and appears only when both capabilities are
+  available.
 - `list_buildbarn_events` and `get_buildbarn_pod_logs` require VictoriaLogs.
 - `get_cost_summary` is Cloud/OpenCost-only.
 - ConfigSet tools and Buildbarn schema tools are independently gated.
@@ -86,6 +91,15 @@ Two capability boundaries are hard rules:
   duration/status plus a recommendation. Do not add `get_build`, target,
   remote-execution, cache, parallelism, or invocation-detail calls merely to
   make the report more comprehensive.
+- For a known invocation ID, use the Slow Invocation playbook below. It starts
+  with `get_invocation(includeCommandLine=true)` so execution mode and the
+  effective `--jobs` ceiling can determine whether remote-capacity tools are
+  relevant, then reads `get_project.data.completedActionLogEnabled` before any
+  remote-action detail or parallelism call. Compare only executing remote-action
+  concurrency with a complete numeric `--jobs` value. Never treat the scheduler
+  executing gauge, worker participation, remote-action concurrency, worker
+  slots, and worker replicas as interchangeable. This is intentionally distinct
+  from the bounded opaque-build flow.
 
 `analyze_buildbarn_storage` discovers which storage-related Buildbarn
 configuration files exist in the authorized namespace and flags secret-bearing
@@ -100,7 +114,7 @@ path, `search_buildbarn_config_schema` for discovery,
 `describe_buildbarn_config_type` for one type, and
 `list_buildbarn_config_roots` for service roots.
 
-Available prompts include `select_project`, `debug_cache_misses`, `analyze_build`,
+Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `invocation_insights`, `investigate_failure`, `diagnose_exec_environment`,
 `test_failures`, `project_health`,
 `cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
@@ -115,11 +129,34 @@ context and likewise are not tool calls.
 
 ## Project, Build, and Invocation Context
 
-- Project scope is server-controlled. Do not pass `projectId` or `project_id` to
-  analytics tools. If the user has not identified the intended project and the
-  choice matters, call `list_my_projects`, show the authorized choices, and ask
-  the host/user to select one. Never guess from an ID or treat a model-supplied
-  project as authorization.
+- **Analytics tools never take a project.** Do not pass `projectId` or
+  `project_id` to any of them; the schemas do not accept it and a model-supplied
+  project is never authorization. Every call reads the project the server
+  resolved for the authenticated user.
+- **Use the current project silently.** A request does not become ambiguous just
+  because the user did not name a project. Do not call `get_project` or
+  `list_my_projects`, ask the user to choose, or delay normal analysis merely to
+  confirm scope. The server already resolved the effective project.
+- **`select_project` is the one exception, and the only way to change project.**
+  Call it only when the user explicitly asks to switch or clear the current
+  selection. Use `list_my_projects` to resolve an authorized ID when needed;
+  ask a follow-up only when the requested name is genuinely ambiguous. The
+  target must be readable and have MCP access enabled. On-prem read access does
+  not require a physical membership row.
+- **Selection is sticky and account-wide.** A successful choice applies to later
+  calls, reconnects, and other conversations for the authenticated user until
+  its 12-hour expiry. Pass an empty `projectId` to clear it and return to default
+  resolution. Say which project is now active after an explicit switch, but do
+  not repeatedly reconfirm it during later analysis.
+- **When `select_project` is absent from `tools/list`**, the deployment cannot
+  store a selection. Continue using the resolved project normally and report
+  that switching is unavailable only in response to a switch request; there is
+  no alternate header-based MCP override.
+- **Default resolution is deterministic and requires no confirmation.** On-prem
+  uses the deployment's project marked `is_default`; Cloud uses the user's
+  normal membership-derived default. An expired, deleted, inaccessible, or
+  MCP-disabled sticky selection falls back to that default without requiring a
+  new choice from the user.
 - Prefer `list_builds` for user-facing history because it groups attempts by
   `buildId`. Use `list_invocations` when you need one attempt.
 - When the user gives an opaque ID from a URL or copied text, call
@@ -170,7 +207,8 @@ context and likewise are not tool calls.
 | User intent | Start with | Drill down with |
 |-------------|------------|-----------------|
 | What should I fix in this invocation? | `resolve_build_or_invocation`, `get_invocation_insights` | Validate `affectedItems` with `find_actions`, `find_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
-| Slow build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `get_invocation_insights`, `summarize_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
+| Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop when those three calls answer the request |
+| Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` and `get_worker_scaling_timeline` when listed |
 | Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
 | Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
@@ -197,14 +235,20 @@ For cache, remote action, and target analysis, start grouped, then drill down:
 
 Work in this order unless the user's question is narrower:
 
-1. Invocation insights: if analyzing one invocation, call `get_invocation_insights`
+1. Invocation mode: for a known invocation, call
+   `get_invocation(includeCommandLine=true)` and read
+   `data.invocation.remoteExecutionEnabled` before selecting remote tools.
+2. Invocation insights: if analyzing one invocation, call `get_invocation_insights`
    and use it as the index of candidate fixes.
-2. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
-3. Critical path and parallelism: long sequential chains limit speedup.
-4. Queue wait: worker pool or scheduler saturation.
-5. Input fetch/output upload: large trees, large outputs, or storage contention.
-6. Slow actions: action outliers, low CPU efficiency, memory or I/O pressure.
-7. Infrastructure: Buildbarn scheduler, workers, storage, gRPC, and pod events.
+3. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
+4. Remote capacity: when remote execution is enabled, correlate remote-action
+   queueing and execution parallelism with scheduler telemetry and a numeric
+   `--jobs` ceiling before assigning a graph or worker bottleneck.
+5. Critical path: long sequential chains limit speedup when ready work and
+   scheduler capacity are not the constraint.
+6. Input fetch/output upload: large trees, large outputs, or storage contention.
+7. Slow actions: action outliers, low CPU efficiency, memory or I/O pressure.
+8. Infrastructure: Buildbarn scheduler, workers, storage, gRPC, and pod events.
 
 ### Invocation Insights and Profile Metrics
 
@@ -271,6 +315,13 @@ Interpret profile bottleneck labels as follows:
 ### Cache Effectiveness
 
 Use `summarize_cache_events` for a build and `get_cache_trends` for history.
+For one invocation, quote hit rate only with
+`data.aggregations.hitCount / data.aggregations.totalActions` (the observed
+remote Action Cache lookup denominator). Do not substitute
+`get_invocation.data.invocation.totalExecutions`
+or Bazel's local disk-cache counters. A zero-hit result explains why remote work
+had to execute, but a like-for-like cold-build comparison is still required to
+decide whether cache misses explain an unusual regression.
 
 | Hit rate | Assessment | Action |
 |----------|------------|--------|
@@ -289,7 +340,7 @@ Miss reason guidance:
 | `PLATFORM_CHANGED` | Execution platform properties changed | Standardize platforms and remote execution properties |
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
-| `CACHE_EVICTED` | Storage too small or retention too short | Ask for verified retention/eviction metrics; `get_storage_health` does not expose eviction age |
+| `CACHE_EVICTED` | Storage too small or retention too short | Read `eviction_age_min_shard` from `get_storage_health` and compare it to the longest build; size the disk and key-location map together |
 | `NEVER_CACHED` | First observed action | Usually expected for new code or targets |
 
 If `INPUT_CHANGED` dominates for one mnemonic or target, call
@@ -301,6 +352,23 @@ action digest when command arguments or environment need confirmation.
 
 Use `analyze_remote_execution` for one invocation and `get_remote_action_trends`
 for cross-build trends.
+
+First confirm `data.invocation.remoteExecutionEnabled` from
+`get_invocation(includeCommandLine=true)`. When false, do not call remote-action,
+parallelism, or scheduler tools merely for completeness. When true, use
+`get_project` to read `data.completedActionLogEnabled`. When completed action
+logging is false, remote-action details and parallelism are unavailable: do not
+call `analyze_remote_execution` or `get_build_parallelism`, and do not interpret
+their absence as zero. Scheduler metrics remain independently available when
+listed, but the capacity diagnosis is lower confidence without the action
+timeline. When completed action logging is true, use
+`analyze_remote_execution.data.totalQueuedSeconds`, `queueWaitStats`, `stats`,
+`avgParallelism`, `uniqueWorkers`, and `workers` together with the execution
+timeline and scheduler window. A worker participating in the invocation proves
+only that it executed an action, not when its replica became ready. Keep the
+causal questions separate: Action Cache misses establish why work executed,
+queue metrics establish delay before execution, and execution duration
+establishes action cost. None of those alone explains the other two.
 
 | Phase | Healthy | Warning | Critical | Usually means |
 |-------|---------|---------|----------|---------------|
@@ -331,24 +399,87 @@ CPU efficiency:
 Use `get_build_parallelism(bucketSeconds=5)` for one build and
 `get_critical_path_trends` for recurring bottlenecks.
 
-- Consistent high concurrency with gradual ramp-down is healthy.
-- Flat low concurrency suggests dependency chains, worker shortage, or a large
-  blocking action.
-- Bursts followed by idle periods suggest build graph phases or batching.
-- If peak parallelism never approaches `--jobs`, the graph is the limit. If queue
-  wait is high at peak, capacity is the limit.
+`get_build_parallelism` counts concurrently executing remote actions from
+worker start to worker completion. It does not count queued/runnable Bazel work,
+local actions, worker replicas, or available worker slots. `--jobs` is Bazel's
+upper bound on concurrent actions, not fleet capacity. Read it from the complete
+command line using last-wins semantics. If it is absent, `auto`, non-numeric, or
+the command line is missing/truncated, do not invent a numeric cap. Compare that
+numeric ceiling only with `get_build_parallelism`'s executing remote-action
+concurrency. The scheduler `executing` gauge is an independently aggregated
+scheduler metric, not a second concurrency count to compare with `--jobs`, and
+neither measurement is a count of worker slots or replicas.
+
+| Observed evidence | Interpretation |
+|-------------------|----------------|
+| Low remote parallelism, low queue wait/depth | Build graph, lack of ready remote work, or one long action is the likely limit |
+| Low remote parallelism, high remote queue wait, and scheduler backlog | Scheduler or worker capacity is the likely limit, even when peak is far below `--jobs`; the scheduler executing gauge corroborates activity but is not a slot count |
+| Long initial queue, fixed low plateau, then stepwise concurrency and worker-participation growth | Capacity arrived late; slow autoscaling is a hypothesis |
+| Peak remains near a numeric `--jobs` cap while scheduler capacity is healthy | The client cap may bind; test a higher value rather than assuming |
+| Peak reaches `--jobs` while scheduler queueing is high | Do not raise `--jobs`; it would add queue pressure without worker capacity |
+
+Never call slow autoscaling proven from scheduler aggregates, remote-action
+parallelism, or `list_worker_pools`. Proving controller delay requires a
+time-aligned desired/available/ready replica or scale-event timeline showing
+capacity arriving after queue growth. Without it, capacity arrival and slow
+autoscaling remain hypotheses. When `get_worker_scaling_timeline` is listed,
+call it with the invocation ID and require its time-aligned desired, available,
+and ready series before upgrading the conclusion. Its explicit lack of scale
+events is a coverage caveat, not proof that no scale event occurred. When
+`data.scaleEventsStatus` is `available_separately` and
+`list_buildbarn_events` is listed, call it with the same `invocationId` so both
+tools use the same padded window. Correlate event and replica timestamps, but do
+not claim event-to-replica causality from timestamp alignment alone.
 
 ### Buildbarn Infrastructure
 
-Start with `summarize_infrastructure_health` scoped to the invocation time window. If a
-component is `warning` or `critical`, drill into its tool.
+Start with `summarize_infrastructure_health` scoped to the invocation time window. Each
+component returns its own `assessment`; drill into a component's tool when it is anything
+other than `healthy`. The vocabularies differ by component:
+
+| Component | Assessment values |
+|-----------|-------------------|
+| Storage, gRPC | `healthy`, `degraded`, `critical` |
+| Scheduler | `healthy`, `congested`, `saturated` |
+| Workers | `healthy`, `idle`, `stressed`, `overloaded` |
+
+Any component may return `no_data`, which means the telemetry is absent — not that the
+component is idle or well.
+
+`idle` means the worker fleet did no work and nothing was queued — a quiet cluster, not a
+problem. A fleet with zero throughput **while the scheduler queue is non-empty** reports
+`stressed` instead, because that is a stuck fleet rather than an idle one. The worker payload
+carries `scheduler_queue_depth` so you can see which case the verdict found.
+
+One assessment still misreads a quiet cluster, so check the metric before repeating it:
+
+- **A near-idle gRPC component can report `degraded` on a handful of requests.** The rate is a
+  ratio, so one `ResourceExhausted` against a few dozen calls clears 1%. Quote the absolute
+  counts from `server_handled` alongside `server_error_rate_pct`.
+
+The summary deliberately queries a subset: each component's headline metric plus whatever its
+verdict needs. The per-component tools return the full metric set, so drill in rather than
+concluding from the summary that a metric does not exist.
+
+Every metric row carries `unit` and `aggregation` (`peak`, `average`, `instant`, `minimum`, or
+`derived`). **Never compare values with different aggregations**: a `peak` 1-minute rate and
+an `average` over the same window are not the same measurement, and reading one against the
+other has previously made a busy component look four orders of magnitude quieter than another.
+
+Invocation-scoped infrastructure tools query a padded project time window. They
+are time-correlated evidence and may include other activity; they do not return
+invocation-owned scheduler rows. `list_worker_pools` is a current snapshot, so
+never use it as the historical replica count for an earlier invocation. The
+scheduler `executing` gauge is likewise a shared aggregate, not the invocation's
+remote-action concurrency and not a count of available worker slots or replicas.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
-| High queue time | `get_scheduler_health` | queue wait p90/p99, per-platform depth | Scale or rebalance workers |
-| Storage load | `get_storage_health` | `data.status`, `data.metrics[].labels`, `data.metrics[].value` | Correlate operation rate with the build window; request detailed latency/retention metrics before sizing |
-| Worker resource pressure | `get_worker_fleet_health` | CPU, memory, block I/O, stage timing | Tune worker size or concurrency |
-| gRPC errors | `get_grpc_health` | status codes, error rate, latency | Investigate service/network failures |
+| High queue time | `get_scheduler_health` | `scheduler_queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown` | Scale or rebalance workers |
+| Suspected late capacity | `get_worker_scaling_timeline` | time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
+| Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
+| Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
+| gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence | Adjust limits or fix failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
 | Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, secret-bearing keys, and `data.findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
@@ -370,24 +501,72 @@ average execution time, average action cost, action count, or worker cost.
 
 ## Playbooks
 
-### Slow Build
+### Slow Build or Invocation
 
-1. Resolve the ID and summarize duration, status, attempts, command, platform, cache,
-   and remote execution flags.
-2. Call `get_invocation_insights` for the invocation attempt. Rank the top insights
-   by estimated savings, preserve caveats, and use `affectedItems` to choose the
-   next validation tool.
-3. Stop when build details and a returned insight already support the requested
-   diagnosis. Do not call both `get_build_details` and `get_build`, and do not run
-   every remaining step merely because it exists.
-4. When the current evidence specifically leaves cache effectiveness unresolved,
-   check `summarize_cache_events`. If hit rate is below 80%, cache misses are likely a
-   primary bottleneck.
-5. Check `analyze_remote_execution` only for a remote-execution timing hypothesis.
-6. Check `get_build_parallelism` only for a parallelism or critical-path hypothesis.
-7. Compare history with `list_builds`, `get_build_timeseries`, `summarize_project_trends`,
-   `get_profile_trends`, `get_cache_trends`, and `get_remote_action_trends`.
-8. If queue, fetch, upload, or infra errors are elevated, run the infrastructure flow.
+For an opaque build ID, preserve the bounded flow:
+`resolve_build_or_invocation` -> `get_build_details` ->
+`get_invocation_insights`. Stop when those calls provide the duration/status and
+a supported recommendation.
+
+For a known invocation ID:
+
+1. Call `get_invocation(includeCommandLine=true)` and
+   `get_invocation_insights`. Record duration/status, cache and remote-execution
+   counts, `data.invocation.remoteExecutionEnabled`, profile bottleneck evidence,
+   and insight caveats. Inspect the outer `truncated`/`truncatedFields` plus
+   `data.commandLineTruncated`.
+2. Resolve the last effective `--jobs` flag from the returned command-line
+   arrays. Use a numeric value only when the command line is complete. Treat an
+   absent flag as `auto`, and a missing, truncated, `auto`, or formula value as
+   an unknown numeric ceiling.
+3. When `summarize_cache_events` is listed, call it and report hit count, miss
+   count, hit rate, and the observed lookup denominator. Cache misses establish
+   how much work had to execute; compare like-for-like cold history before
+   assigning them the whole wall-time regression. If cache-event tools are not
+   listed, say that cache-event metrics are unavailable.
+4. When remote execution is false, skip `analyze_remote_execution`,
+   `get_build_parallelism`, and scheduler tools. Diagnose cache, profile, local
+   resource, critical-path, or analysis evidence instead.
+5. When remote execution is true, call `get_project` and read
+   `data.completedActionLogEnabled`. If it is false, report remote-action detail
+   and parallelism as unavailable rather than zero and skip
+   `analyze_remote_execution` and `get_build_parallelism`. If it is true, call
+   `analyze_remote_execution` and `get_build_parallelism(bucketSeconds=5)`.
+   Compare queue-wait totals and percentiles, actual execution/fetch/upload
+   time, the timestamped concurrency ramp and peak, and worker participation,
+   but compare only the executing remote-action concurrency ramp and peak with a
+   numeric `--jobs` ceiling. Do not compare worker participation or the
+   scheduler executing gauge with `--jobs`.
+6. When remote execution is true and `get_scheduler_health` is listed, call it
+   with the same `invocationId`, whether or not completed action logging is on.
+   Correlate queue depth/duration, executing and queued rates, and platform or
+   size-class breakdown over its returned start/end window. This is a padded,
+   shared project window, so label it corroborating rather than invocation-owned.
+   Its executing gauge is neither worker slots/replicas nor directly comparable
+   to the remote-action concurrency timeline. When it is absent, say scheduler
+   telemetry is unavailable. When completed action logging is off, lower
+   confidence because scheduler data cannot be paired with the remote-action
+   timeline.
+7. When `get_worker_scaling_timeline` is listed and capacity arrived late is a
+   live hypothesis, call it with the same `invocationId`. Align its desired,
+   available, and ready replica series with the invocation-owned queue and
+   concurrency timeline. If those series are absent or incomplete, or the tool
+   reports scale events unavailable, do not upgrade the hypothesis. When
+   `data.scaleEventsStatus` is `available_separately` and
+   `list_buildbarn_events` is listed, call it with the same `invocationId` and
+   correlate events against the replica timestamps without claiming that a
+   nearby event caused the replica change.
+8. Classify the evidence with the Parallelism and Critical Path matrix. High
+   queueing plus low executing parallelism supports worker/scheduler capacity;
+   low queueing plus low parallelism supports the graph or lack of ready work.
+   A late stepwise ramp is consistent with slow autoscaling, but capacity remains
+   a hypothesis until time-aligned desired/available/ready replica or scale-event
+   history shows capacity arriving after queue growth.
+9. Compare a fast and slow like-for-like invocation when deciding whether the
+   result is a regression rather than the normal cold-build cost.
+10. Rank findings by observed wall-time impact. Keep Action Cache misses,
+   scheduler queueing, and slow individual actions separate rather than making
+   one explain the entire duration.
 
 ### Cache Hit Rate Improvement
 
@@ -398,7 +577,9 @@ average execution time, average action cost, action count, or worker cost.
 3. Drill into `find_cache_events(includeMissAnalysis=true)`.
 4. Group by reason and map to fixes.
 5. Estimate impact and rank by savings divided by effort.
-6. If eviction is significant, check `get_storage_health`.
+6. If `CACHE_EVICTED` is significant, call `get_storage_health` and read
+   `eviction_age_min_shard` against the longest build in the window. Eviction age above the
+   longest build means eviction is not the constraint and the misses have another cause.
 
 ### Regression This Week
 
@@ -461,9 +642,13 @@ code bugs, flakes, or resource exhaustion.
    the image is fixed by moving the image, not by downgrading the toolchain.
 5. Establish what actually executed. The `container-image` property is only a scheduler
    matching key — Buildbarn never pulls it. The real userspace is the pool's **runner**
-   container image from the worker Deployment pod spec, which Hermetiq MCP does not expose
-   today (`get_buildbarn_config` returns component jsonnet only). Ask the operator for it,
-   then compare base OS and glibc against what the action requested. The glibc table is in
+   container image, which `list_worker_pools` returns in `data.pools[].images[]`. Each pool
+   lists both containers from the worker Deployment: the `ghcr.io/buildbarn/bb-worker` image
+   and the runner image beside it. The runner is the non-`bb-worker` entry and is the one
+   that supplies glibc — for example a pool listing `bb-worker` alongside
+   `ghcr.io/catthehacker/ubuntu:act-22.04` executes actions against Ubuntu 22.04 userspace.
+   `list_worker_pools` is a current snapshot, so for an older invocation confirm the image
+   has not changed since. Compare base OS and glibc against what the action requested. The glibc table is in
    `references/REFERENCE.md` under bb-runner; a binary needing `GLIBC_2.34` cannot run on
    any glibc 2.31 image.
 6. Find the regression boundary. `list_builds` filtered to the repository gives the last
@@ -492,13 +677,16 @@ code bugs, flakes, or resource exhaustion.
 
 ### Storage Configuration Audit
 
-1. Call `analyze_buildbarn_storage` (optionally with `store`) to establish which
-   storage configuration files `data.configurationFiles` names, plus any secret-bearing
+1. Call `analyze_buildbarn_storage` without `store` to establish which storage
+   configuration files `data.configurationFiles` names, plus any secret-bearing
    keys and `data.findings` it reports. Treat this as scoping, not as the audit: it does
    not return geometry, key-location-map sizing, shard topology, or
    schema-validation errors, and `findings` is often empty. To audit anything you
    still need the file contents — go on to `get_buildbarn_config` for each file it
-   named. If `analyze_buildbarn_storage` is not registered, first
+   named. Determine whether each configured store is CAS, AC, ISCC, or FSAC from
+   the parsed configuration content, not from a filename substring or the user's
+   requested store label. Apply an optional store focus only after that mapping.
+   If `analyze_buildbarn_storage` is not registered, first
    check whether `get_buildbarn_config` is present in tools/list; when it is, call
    `get_buildbarn_config(component="storage")` plus `component="frontend"`, interpret
    fields with the proto-intel tools, and read the `buildbarn://guides/storage-model`
@@ -508,11 +696,13 @@ code bugs, flakes, or resource exhaustion.
    establishes that it is the deployed source. Never choose an arbitrary listed
    ConfigSet and describe it as active. Without one of those sources, stop and
    report that active configuration access is unavailable.
-2. Corroborate with `get_storage_health(timeRange="24h")` or the user's
-   supported window. Read the returned `data.status` and `data.metrics[]`
-   (`name`, `labels`, and `value`); the current tool exposes operation telemetry,
-   not eviction-age, disk-health, or key-location-map saturation fields. Ask the
-   operator for those measurements before making retention or hash-table claims.
+2. Corroborate with `get_storage_health(timeRange="24h")` or the user's supported window.
+   Read `data.assessment` and `data.metrics[]` (`name`, `labels`, `value`, `unit`,
+   `aggregation`). Retention comes from `eviction_age_min_shard`, hash-table pressure from
+   the `hash_*` rows, and blob sizes from `cas_blob_size_*`. Use `eviction_age_min_shard`
+   rather than `eviction_age`, and treat a tens-of-megabytes blob-size p50 as a histogram
+   bucket artifact rather than a real median. `references/infrastructure-tuning.md` has the
+   full metric table and both caveats.
 3. For stores on raw block devices the config cannot reveal the device size — ask
    the operator for the device or PVC size, then finish the arithmetic
    (block size = device bytes / total blocks; one block is the largest storable blob).

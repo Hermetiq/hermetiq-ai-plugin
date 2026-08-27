@@ -121,6 +121,8 @@ def validate_eval_suite(catalog: dict[str, Any], server: dict[str, Any] | None, 
         "invalid_argument_recovery",
         "mutation_refusal",
         "mutation_confirmation",
+        "remote_capacity",
+        "remote_disabled",
     }
     categories = {case.get("category") for case in cases}
     missing = required_categories - categories
