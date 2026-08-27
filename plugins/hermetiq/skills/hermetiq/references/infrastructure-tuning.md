@@ -14,7 +14,10 @@ Use `analyze_buildbarn_storage` when it is registered (requires Kubernetes acces
 storage geometry or configuration correctness — its own description says so, and it commonly
 returns `findings: []` for a perfectly ordinary deployment. Treat it as a file index, then
 read the files it names with `get_buildbarn_config(component=...)` and do the geometry
-yourself. If it is absent, use `get_buildbarn_config` only when that tool is also present
+yourself. Run discovery without a `store` filename filter, then identify CAS, AC, ISCC, and
+FSAC stores from the returned configuration content. A filename substring or requested store
+label is not evidence of the configured store type; apply that focus only after mapping the
+content. If it is absent, use `get_buildbarn_config` only when that tool is also present
 in tools/list; otherwise ask the operator for the storage/frontend/common ConfigMap Jsonnet
 or use ConfigSets tools when present, and label the result as config-supplied rather than
 live-cluster verified. The underlying model lives in the MCP resource
@@ -68,7 +71,7 @@ Two reading caveats:
   averaged bucket rates, so coarse buckets inflate them. A p50 in the tens of megabytes is a
   bucket artifact, not a typical Bazel blob. Say so rather than sizing against it.
 - **Breakdown metrics omit zero-valued rows.** `<type>_operations_by_op`, `eviction_set_ops`,
-  `server_handled`, `top_errors`, `completed_by_code`, `platform_breakdown`, and
+  `server_handled`, `top_codes`, `completed_by_code`, `platform_breakdown`, and
   `service_breakdown` return only series that actually fired. An absent row means that
   combination never occurred in the window, not that telemetry is missing. Single unlabeled
   gauges keep their zeros, because there zero is the answer.
@@ -253,22 +256,41 @@ For a known invocation with remote execution enabled:
 4. Use `get_build_parallelism(bucketSeconds=5)` for the executing remote-action
    ramp. It does not count queued/runnable work, replicas, or available slots.
 5. Use `get_scheduler_health(invocationId=...)` when listed. Its padded project
-   window may include other activity, so correlate rather than attribute.
+   window may include other activity, so label it shared corroborating evidence
+   rather than invocation-owned data. Its scheduler `executing` gauge is not the
+   remote-action concurrency series and is not a count of worker slots or replicas.
+   Compare only the remote-action concurrency series against a numeric `--jobs`.
+6. Use `get_worker_scaling_timeline(invocationId=...)` when listed. Align its
+   desired, available, and ready replica series with the invocation-owned queue
+   and concurrency timeline. Missing or incomplete series leave slow autoscaling
+   unproven; an explicit scale-events-unavailable field is a coverage caveat,
+   not evidence that no scale event occurred. When `data.scaleEventsStatus` is
+   `available_separately` and `list_buildbarn_events` is listed, call it with the
+   same `invocationId` so both tools use the same padded window. Correlate event
+   and replica timestamps, but do not infer event-to-replica causality from
+   timestamp alignment alone.
 
 | Pattern | Supported conclusion |
 |---------|----------------------|
 | Low executing parallelism + low queueing | Graph, lack of ready remote work, or a long action is likely limiting |
-| Low executing parallelism + high queue duration/depth + few executing tasks | Scheduler/worker capacity is likely limiting |
+| Low executing parallelism + high queue duration/depth | Scheduler/worker capacity is likely limiting; the scheduler executing gauge corroborates activity but does not quantify slots |
 | Long initial queue + fixed low concurrency plateau + later stepwise ramp | Capacity arrived late; slow autoscaling is plausible |
 | One worker handles most actions while several others handle only a small tail | Later worker participation supports the late-capacity hypothesis |
 
 The last two patterns do not prove autoscaler behavior. `list_worker_pools` is a
 live desired/available snapshot, and remote-action worker rows show participation
-only. Require historical desired/available replica, readiness, or controller
-scale-event telemetry before stating that an autoscaler reacted slowly. If that
-history is unavailable, label the conclusion medium confidence and recommend
-instrumenting the scale decision, pod scheduling, image pull, and readiness
-timeline separately.
+only. `get_worker_scaling_timeline` is the preferred historical replica view when
+listed. Require its time-aligned desired/available/ready series, or an equivalent
+controller scale-event timeline, to show capacity arriving after queue growth
+before stating that an autoscaler reacted slowly. If that history is unavailable,
+keep capacity arrival as a hypothesis and recommend instrumenting the scale
+decision, pod scheduling, image pull, and readiness timeline separately.
+
+Keep causality partitioned in the report: Action Cache misses explain why work
+had to execute, queue metrics explain delay before execution, and execution
+duration explains action cost. A cold cache can increase demand without proving
+that it caused scheduler delay, and scheduler delay does not make actions slow
+once they start.
 
 ---
 

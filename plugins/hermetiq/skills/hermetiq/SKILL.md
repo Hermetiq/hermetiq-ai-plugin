@@ -64,7 +64,9 @@ The catalog is deployment-aware:
   `group_cache_events`, then call `find_cache_events` only if groups exist.
 - Kubernetes-backed tools such as `get_buildbarn_config`,
   `analyze_buildbarn_storage`, and `list_worker_pools` appear only when the
-  server has Kubernetes access.
+  server has Kubernetes access. `get_worker_scaling_timeline` additionally
+  requires infrastructure metrics and appears only when both capabilities are
+  available.
 - `list_buildbarn_events` and `get_buildbarn_pod_logs` require VictoriaLogs.
 - `get_cost_summary` is Cloud/OpenCost-only.
 - ConfigSet tools and Buildbarn schema tools are independently gated.
@@ -93,8 +95,11 @@ Two capability boundaries are hard rules:
   with `get_invocation(includeCommandLine=true)` so execution mode and the
   effective `--jobs` ceiling can determine whether remote-capacity tools are
   relevant, then reads `get_project.data.completedActionLogEnabled` before any
-  remote-action detail or parallelism call. This is intentionally distinct from
-  the bounded opaque-build flow.
+  remote-action detail or parallelism call. Compare only executing remote-action
+  concurrency with a complete numeric `--jobs` value. Never treat the scheduler
+  executing gauge, worker participation, remote-action concurrency, worker
+  slots, and worker replicas as interchangeable. This is intentionally distinct
+  from the bounded opaque-build flow.
 
 `analyze_buildbarn_storage` discovers which storage-related Buildbarn
 configuration files exist in the authorized namespace and flags secret-bearing
@@ -203,7 +208,7 @@ context and likewise are not tool calls.
 |-------------|------------|-----------------|
 | What should I fix in this invocation? | `resolve_build_or_invocation`, `get_invocation_insights` | Validate `affectedItems` with `find_actions`, `find_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
 | Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop when those three calls answer the request |
-| Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` when listed |
+| Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` and `get_worker_scaling_timeline` when listed |
 | Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
 | Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
@@ -360,7 +365,10 @@ timeline. When completed action logging is true, use
 `analyze_remote_execution.data.totalQueuedSeconds`, `queueWaitStats`, `stats`,
 `avgParallelism`, `uniqueWorkers`, and `workers` together with the execution
 timeline and scheduler window. A worker participating in the invocation proves
-only that it executed an action, not when its replica became ready.
+only that it executed an action, not when its replica became ready. Keep the
+causal questions separate: Action Cache misses establish why work executed,
+queue metrics establish delay before execution, and execution duration
+establishes action cost. None of those alone explains the other two.
 
 | Phase | Healthy | Warning | Critical | Usually means |
 |-------|---------|---------|----------|---------------|
@@ -396,19 +404,32 @@ worker start to worker completion. It does not count queued/runnable Bazel work,
 local actions, worker replicas, or available worker slots. `--jobs` is Bazel's
 upper bound on concurrent actions, not fleet capacity. Read it from the complete
 command line using last-wins semantics. If it is absent, `auto`, non-numeric, or
-the command line is missing/truncated, do not invent a numeric cap.
+the command line is missing/truncated, do not invent a numeric cap. Compare that
+numeric ceiling only with `get_build_parallelism`'s executing remote-action
+concurrency. The scheduler `executing` gauge is an independently aggregated
+scheduler metric, not a second concurrency count to compare with `--jobs`, and
+neither measurement is a count of worker slots or replicas.
 
 | Observed evidence | Interpretation |
 |-------------------|----------------|
 | Low remote parallelism, low queue wait/depth | Build graph, lack of ready remote work, or one long action is the likely limit |
-| Low remote parallelism, high remote queue wait, scheduler backlog, few executing tasks | Scheduler or worker capacity is the likely limit, even when peak is far below `--jobs` |
+| Low remote parallelism, high remote queue wait, and scheduler backlog | Scheduler or worker capacity is the likely limit, even when peak is far below `--jobs`; the scheduler executing gauge corroborates activity but is not a slot count |
 | Long initial queue, fixed low plateau, then stepwise concurrency and worker-participation growth | Capacity arrived late; slow autoscaling is a hypothesis |
 | Peak remains near a numeric `--jobs` cap while scheduler capacity is healthy | The client cap may bind; test a higher value rather than assuming |
 | Peak reaches `--jobs` while scheduler queueing is high | Do not raise `--jobs`; it would add queue pressure without worker capacity |
 
 Never call slow autoscaling proven from scheduler aggregates, remote-action
 parallelism, or `list_worker_pools`. Proving controller delay requires a
-time-aligned desired/available replica, readiness, or scale-event timeline.
+time-aligned desired/available/ready replica or scale-event timeline showing
+capacity arriving after queue growth. Without it, capacity arrival and slow
+autoscaling remain hypotheses. When `get_worker_scaling_timeline` is listed,
+call it with the invocation ID and require its time-aligned desired, available,
+and ready series before upgrading the conclusion. Its explicit lack of scale
+events is a coverage caveat, not proof that no scale event occurred. When
+`data.scaleEventsStatus` is `available_separately` and
+`list_buildbarn_events` is listed, call it with the same `invocationId` so both
+tools use the same padded window. Correlate event and replica timestamps, but do
+not claim event-to-replica causality from timestamp alignment alone.
 
 ### Buildbarn Infrastructure
 
@@ -448,14 +469,17 @@ other has previously made a busy component look four orders of magnitude quieter
 Invocation-scoped infrastructure tools query a padded project time window. They
 are time-correlated evidence and may include other activity; they do not return
 invocation-owned scheduler rows. `list_worker_pools` is a current snapshot, so
-never use it as the historical replica count for an earlier invocation.
+never use it as the historical replica count for an earlier invocation. The
+scheduler `executing` gauge is likewise a shared aggregate, not the invocation's
+remote-action concurrency and not a count of available worker slots or replicas.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
-| High queue time | `get_scheduler_health` | `queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown` | Scale or rebalance workers |
+| High queue time | `get_scheduler_health` | `scheduler_queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown` | Scale or rebalance workers |
+| Suspected late capacity | `get_worker_scaling_timeline` | time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
 | Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
 | Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
-| gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_errors`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures |
+| gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence | Adjust limits or fix failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
 | Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, secret-bearing keys, and `data.findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
@@ -509,24 +533,38 @@ For a known invocation ID:
    `analyze_remote_execution` and `get_build_parallelism`. If it is true, call
    `analyze_remote_execution` and `get_build_parallelism(bucketSeconds=5)`.
    Compare queue-wait totals and percentiles, actual execution/fetch/upload
-   time, the timestamped concurrency ramp and peak, and worker participation
-   against only a numeric `--jobs` ceiling.
+   time, the timestamped concurrency ramp and peak, and worker participation,
+   but compare only the executing remote-action concurrency ramp and peak with a
+   numeric `--jobs` ceiling. Do not compare worker participation or the
+   scheduler executing gauge with `--jobs`.
 6. When remote execution is true and `get_scheduler_health` is listed, call it
    with the same `invocationId`, whether or not completed action logging is on.
    Correlate queue depth/duration, executing and queued rates, and platform or
-   size-class breakdown over its returned start/end window. When it is absent,
-   say scheduler telemetry is unavailable. When completed action logging is
-   off, lower confidence because scheduler data cannot be paired with the
-   remote-action timeline.
-7. Classify the evidence with the Parallelism and Critical Path matrix. High
+   size-class breakdown over its returned start/end window. This is a padded,
+   shared project window, so label it corroborating rather than invocation-owned.
+   Its executing gauge is neither worker slots/replicas nor directly comparable
+   to the remote-action concurrency timeline. When it is absent, say scheduler
+   telemetry is unavailable. When completed action logging is off, lower
+   confidence because scheduler data cannot be paired with the remote-action
+   timeline.
+7. When `get_worker_scaling_timeline` is listed and capacity arrived late is a
+   live hypothesis, call it with the same `invocationId`. Align its desired,
+   available, and ready replica series with the invocation-owned queue and
+   concurrency timeline. If those series are absent or incomplete, or the tool
+   reports scale events unavailable, do not upgrade the hypothesis. When
+   `data.scaleEventsStatus` is `available_separately` and
+   `list_buildbarn_events` is listed, call it with the same `invocationId` and
+   correlate events against the replica timestamps without claiming that a
+   nearby event caused the replica change.
+8. Classify the evidence with the Parallelism and Critical Path matrix. High
    queueing plus low executing parallelism supports worker/scheduler capacity;
    low queueing plus low parallelism supports the graph or lack of ready work.
-   A late stepwise ramp is consistent with slow autoscaling, but call it proven
-   only when replica/readiness or scale-event history shows capacity arriving
-   after queue growth.
-8. Compare a fast and slow like-for-like invocation when deciding whether the
+   A late stepwise ramp is consistent with slow autoscaling, but capacity remains
+   a hypothesis until time-aligned desired/available/ready replica or scale-event
+   history shows capacity arriving after queue growth.
+9. Compare a fast and slow like-for-like invocation when deciding whether the
    result is a regression rather than the normal cold-build cost.
-9. Rank findings by observed wall-time impact. Keep Action Cache misses,
+10. Rank findings by observed wall-time impact. Keep Action Cache misses,
    scheduler queueing, and slow individual actions separate rather than making
    one explain the entire duration.
 
@@ -639,13 +677,16 @@ code bugs, flakes, or resource exhaustion.
 
 ### Storage Configuration Audit
 
-1. Call `analyze_buildbarn_storage` (optionally with `store`) to establish which
-   storage configuration files `data.configurationFiles` names, plus any secret-bearing
+1. Call `analyze_buildbarn_storage` without `store` to establish which storage
+   configuration files `data.configurationFiles` names, plus any secret-bearing
    keys and `data.findings` it reports. Treat this as scoping, not as the audit: it does
    not return geometry, key-location-map sizing, shard topology, or
    schema-validation errors, and `findings` is often empty. To audit anything you
    still need the file contents — go on to `get_buildbarn_config` for each file it
-   named. If `analyze_buildbarn_storage` is not registered, first
+   named. Determine whether each configured store is CAS, AC, ISCC, or FSAC from
+   the parsed configuration content, not from a filename substring or the user's
+   requested store label. Apply an optional store focus only after that mapping.
+   If `analyze_buildbarn_storage` is not registered, first
    check whether `get_buildbarn_config` is present in tools/list; when it is, call
    `get_buildbarn_config(component="storage")` plus `component="frontend"`, interpret
    fields with the proto-intel tools, and read the `buildbarn://guides/storage-model`

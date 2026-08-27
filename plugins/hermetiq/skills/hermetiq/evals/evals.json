@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "skillName": "hermetiq",
-  "catalogVersion": "0.16.0",
+  "catalogVersion": "0.17.0",
   "baseline": {
     "source": "cloud-native/bep-nats/mcpv2/evals/*.json before the coordinated skill migration",
     "cases": 23,
@@ -60,12 +60,12 @@
       "id": "remote-capacity-diagnosis",
       "category": "remote_capacity",
       "prompt": "Use the Hermetiq skill. Diagnose whether known invocation ${REMOTE_EXEC_INVOCATION_ID} was slow because remote worker capacity arrived late. Start from the invocation, inspect its effective --jobs setting, report the cache baseline, and then follow the remote-capacity branch without broadening into cache drill-down or project-history analysis. Distinguish observed scheduler/parallelism evidence from autoscaler causality.",
-      "expectedMcpSequence": ["get_invocation", "get_invocation_insights", "summarize_cache_events", "get_project", "analyze_remote_execution", "get_build_parallelism", "get_scheduler_health"],
+      "expectedMcpSequence": ["get_invocation", "get_invocation_insights", "summarize_cache_events", "get_project", "analyze_remote_execution", "get_build_parallelism", "get_scheduler_health", "get_worker_scaling_timeline", "list_buildbarn_events"],
       "expectedFirstCall": {"tool": "get_invocation", "arguments": {"includeCommandLine": true, "invocationId": "${REMOTE_EXEC_INVOCATION_ID}"}},
       "maximumUnnecessaryCalls": 0,
-      "expectedBehavior": ["reads remoteExecutionEnabled before selecting remote tools", "reports cache hits and misses with the observed lookup denominator", "reads get_project.completedActionLogEnabled before remote-action detail or parallelism", "compares remote-action concurrency with a numeric --jobs ceiling only when command-line data is complete", "does not claim autoscaling is proven without replica or scale-event history"],
-      "evidence": ["cites returned cache hit and miss counts", "cites returned remote queue timing", "cites the remote-action parallelism ramp or peak", "cites scheduler telemetry over its returned window"],
-      "expectedFinalPatterns": ["cache", "hits?|miss", "completed action|action log", "--jobs|jobs", "queue", "parallel|concurr", "autoscal.*(hypothesis|consistent|plausible|not proven|cannot prove)|cannot prove.*autoscal"]
+      "expectedBehavior": ["reads remoteExecutionEnabled before selecting remote tools", "reports cache hits and misses with the observed lookup denominator", "reads get_project.completedActionLogEnabled before remote-action detail or parallelism", "applies last-wins semantics and compares only executing remote-action concurrency with a numeric --jobs ceiling when command-line data is complete", "does not treat scheduler executing, remote-action concurrency, participating workers, slots, or replicas as interchangeable", "labels the padded shared scheduler window as corroborating rather than invocation-owned", "keeps cache misses, queue wait, and execution duration as separate causal evidence", "uses get_worker_scaling_timeline when listed and requires time-aligned desired, available, and ready series before supporting autoscaler delay", "treats missing scaling series or unavailable scale events as insufficient proof", "when scaleEventsStatus is available_separately, calls list_buildbarn_events with the same invocation window and treats event-to-replica timing as correlation rather than causality"],
+      "evidence": ["cites returned cache hit and miss counts as the amount of work that required execution", "cites returned remote queue timing separately from execution duration", "cites the remote-action parallelism ramp or peak", "cites scheduler telemetry over its returned padded window without interpreting executing as worker slots", "cites the scaling timeline desired, available, and ready replica series or explicitly states its coverage gap", "cites same-window Buildbarn events without claiming that timestamp proximity caused the replica change"],
+      "expectedFinalPatterns": ["cache", "hits?|miss", "completed action|action log", "--jobs|jobs", "queue", "execut(ion|ing)", "parallel|concurr", "scheduler.*(shared|padded|corroborat)|(?:shared|padded|corroborat).*scheduler", "slots?|replicas?", "desired.*available.*ready|ready.*available.*desired|scal(?:ing|e).*(unavailable|missing|incomplete)", "events?.*(correlat|not prove|does not prove|cannot prove|not caus)|(?:correlat|not prove|does not prove|cannot prove|not caus).*events?", "autoscal.*(hypothesis|consistent|plausible|supported|not proven|cannot prove)|cannot prove.*autoscal"]
     },
     {
       "id": "remote-execution-disabled-guard",
@@ -128,8 +128,8 @@
       "prompt": "Use the Hermetiq skill. Audit the active Buildbarn storage Jsonnet configuration on this server. Both Kubernetes-backed live-configuration tools are absent, and neither the user nor host named a ConfigSet as the deployed source. Do not choose a saved ConfigSet, use schema metadata, or substitute runtime storage metrics for an active-configuration audit.",
       "expectedMcpSequence": [],
       "maximumUnnecessaryCalls": 0,
-      "expectedBehavior": ["reports the configuration capability as unavailable", "does not call get_storage_health as a substitute"],
-      "evidence": ["distinguishes absent configuration access from runtime metrics"],
+      "expectedBehavior": ["reports the configuration capability as unavailable", "does not call get_storage_health as a substitute", "does not infer a CAS, AC, ISCC, or FSAC store from a filename or requested label without configuration content"],
+      "evidence": ["distinguishes absent configuration access from runtime metrics", "states that store selection requires active configuration content"],
       "expectedFinalPatterns": ["unavailable|not available|absent|lack", "configuration"]
     },
     {

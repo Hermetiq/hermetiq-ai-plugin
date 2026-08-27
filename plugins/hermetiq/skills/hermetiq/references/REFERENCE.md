@@ -162,7 +162,18 @@ Insight workflow:
 4. Validate the top insights with the smallest underlying tool call: `find_actions`,
    `find_cache_events(includeMissAnalysis=true)`, `analyze_remote_execution`, or
    `get_build_parallelism`.
-5. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
+5. For a remote-capacity claim, first confirm remote execution and
+   `data.completedActionLogEnabled`. Compare only executing remote-action
+   concurrency with a complete last-wins numeric `--jobs`; the scheduler executing
+   gauge, participating workers, worker slots, and replicas are different quantities.
+   Treat a padded scheduler window as shared corroboration and require time-aligned
+   desired/available/ready replica or scale-event history to prove autoscaler delay.
+   When listed, `get_worker_scaling_timeline` is the canonical historical replica
+   view; absent/incomplete series or unavailable scale events preserve the
+   hypothesis. When `data.scaleEventsStatus` is `available_separately`, use
+   `list_buildbarn_events` with the same invocation window when listed, while
+   treating timestamp alignment as correlation rather than event-to-replica causality.
+6. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
 
 Profile bottleneck glossary:
 
@@ -627,7 +638,8 @@ operator-supplied fact and label it as such.
 Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
 message limits, worker concurrency) drift per deployment and per release — do not quote
 remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (a file index and secret scan only,
-not geometry) followed by `get_buildbarn_config` (raw jsonnet), and correlate with
+not geometry) without a store filter, followed by `get_buildbarn_config` (raw jsonnet).
+Identify CAS, AC, ISCC, and FSAC from configuration content rather than filenames, then correlate with
 `get_storage_health` / `get_worker_fleet_health` / `get_scheduler_health` before recommending
 changes.
 
