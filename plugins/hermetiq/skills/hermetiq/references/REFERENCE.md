@@ -456,8 +456,8 @@ collection:
   per record, with the record count automatically rounded down to a prime (no need to
   pre-compute primes).
 - An undersized map fails **silently**: inserts displace older entries and eventually drop,
-  so blob bytes stay on disk but become unreachable. Watch the `hash_table` saturation rates
-  in get_storage_health. **The map and the blocks are coupled** — growing the disk without
+  so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`,
+  `hash_put_too_many_iterations`, and `hash_put_ignored_invalid` rows in `get_storage_health`. **The map and the blocks are coupled** — growing the disk without
   growing the map makes eviction worse.
 - Can be stored in-memory (faster, lost on restart) or on block device (persistent).
 
@@ -626,8 +626,8 @@ operator-supplied fact and label it as such.
 
 Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
 message limits, worker concurrency) drift per deployment and per release — do not quote
-remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (derived geometry,
-capacity, and findings) or `get_buildbarn_config` (raw jsonnet), and correlate with
+remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (a file index and secret scan only,
+not geometry) followed by `get_buildbarn_config` (raw jsonnet), and correlate with
 `get_storage_health` / `get_worker_fleet_health` / `get_scheduler_health` before recommending
 changes.
 

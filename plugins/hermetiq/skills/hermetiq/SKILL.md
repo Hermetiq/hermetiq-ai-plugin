@@ -335,7 +335,7 @@ Miss reason guidance:
 | `PLATFORM_CHANGED` | Execution platform properties changed | Standardize platforms and remote execution properties |
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
-| `CACHE_EVICTED` | Storage too small or retention too short | Ask for verified retention/eviction metrics; `get_storage_health` does not expose eviction age |
+| `CACHE_EVICTED` | Storage too small or retention too short | Read `eviction_age_min_shard` from `get_storage_health` and compare it to the longest build; size the disk and key-location map together |
 | `NEVER_CACHED` | First observed action | Usually expected for new code or targets |
 
 If `INPUT_CHANGED` dominates for one mnemonic or target, call
@@ -412,8 +412,38 @@ time-aligned desired/available replica, readiness, or scale-event timeline.
 
 ### Buildbarn Infrastructure
 
-Start with `summarize_infrastructure_health` scoped to the invocation time window. If a
-component is `warning` or `critical`, drill into its tool.
+Start with `summarize_infrastructure_health` scoped to the invocation time window. Each
+component returns its own `assessment`; drill into a component's tool when it is anything
+other than `healthy`. The vocabularies differ by component:
+
+| Component | Assessment values |
+|-----------|-------------------|
+| Storage, gRPC | `healthy`, `degraded`, `critical` |
+| Scheduler | `healthy`, `congested`, `saturated` |
+| Workers | `healthy`, `idle`, `stressed`, `overloaded` |
+
+Any component may return `no_data`, which means the telemetry is absent — not that the
+component is idle or well.
+
+`idle` means the worker fleet did no work and nothing was queued — a quiet cluster, not a
+problem. A fleet with zero throughput **while the scheduler queue is non-empty** reports
+`stressed` instead, because that is a stuck fleet rather than an idle one. The worker payload
+carries `scheduler_queue_depth` so you can see which case the verdict found.
+
+One assessment still misreads a quiet cluster, so check the metric before repeating it:
+
+- **A near-idle gRPC component can report `degraded` on a handful of requests.** The rate is a
+  ratio, so one `ResourceExhausted` against a few dozen calls clears 1%. Quote the absolute
+  counts from `server_handled` alongside `server_error_rate_pct`.
+
+The summary deliberately queries a subset: each component's headline metric plus whatever its
+verdict needs. The per-component tools return the full metric set, so drill in rather than
+concluding from the summary that a metric does not exist.
+
+Every metric row carries `unit` and `aggregation` (`peak`, `average`, `instant`, `minimum`, or
+`derived`). **Never compare values with different aggregations**: a `peak` 1-minute rate and
+an `average` over the same window are not the same measurement, and reading one against the
+other has previously made a busy component look four orders of magnitude quieter than another.
 
 Invocation-scoped infrastructure tools query a padded project time window. They
 are time-correlated evidence and may include other activity; they do not return
@@ -422,10 +452,10 @@ never use it as the historical replica count for an earlier invocation.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
-| High queue time | `get_scheduler_health` | queue wait p90/p99, per-platform depth | Scale or rebalance workers |
-| Storage load | `get_storage_health` | `data.status`, `data.metrics[].labels`, `data.metrics[].value` | Correlate operation rate with the build window; request detailed latency/retention metrics before sizing |
-| Worker resource pressure | `get_worker_fleet_health` | CPU, memory, block I/O, stage timing | Tune worker size or concurrency |
-| gRPC errors | `get_grpc_health` | status codes, error rate, latency | Investigate service/network failures |
+| High queue time | `get_scheduler_health` | `queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown` | Scale or rebalance workers |
+| Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
+| Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
+| gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_errors`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence | Adjust limits or fix failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
 | Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, secret-bearing keys, and `data.findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
@@ -509,7 +539,9 @@ For a known invocation ID:
 3. Drill into `find_cache_events(includeMissAnalysis=true)`.
 4. Group by reason and map to fixes.
 5. Estimate impact and rank by savings divided by effort.
-6. If eviction is significant, check `get_storage_health`.
+6. If `CACHE_EVICTED` is significant, call `get_storage_health` and read
+   `eviction_age_min_shard` against the longest build in the window. Eviction age above the
+   longest build means eviction is not the constraint and the misses have another cause.
 
 ### Regression This Week
 
@@ -572,9 +604,13 @@ code bugs, flakes, or resource exhaustion.
    the image is fixed by moving the image, not by downgrading the toolchain.
 5. Establish what actually executed. The `container-image` property is only a scheduler
    matching key — Buildbarn never pulls it. The real userspace is the pool's **runner**
-   container image from the worker Deployment pod spec, which Hermetiq MCP does not expose
-   today (`get_buildbarn_config` returns component jsonnet only). Ask the operator for it,
-   then compare base OS and glibc against what the action requested. The glibc table is in
+   container image, which `list_worker_pools` returns in `data.pools[].images[]`. Each pool
+   lists both containers from the worker Deployment: the `ghcr.io/buildbarn/bb-worker` image
+   and the runner image beside it. The runner is the non-`bb-worker` entry and is the one
+   that supplies glibc — for example a pool listing `bb-worker` alongside
+   `ghcr.io/catthehacker/ubuntu:act-22.04` executes actions against Ubuntu 22.04 userspace.
+   `list_worker_pools` is a current snapshot, so for an older invocation confirm the image
+   has not changed since. Compare base OS and glibc against what the action requested. The glibc table is in
    `references/REFERENCE.md` under bb-runner; a binary needing `GLIBC_2.34` cannot run on
    any glibc 2.31 image.
 6. Find the regression boundary. `list_builds` filtered to the repository gives the last
@@ -619,11 +655,13 @@ code bugs, flakes, or resource exhaustion.
    establishes that it is the deployed source. Never choose an arbitrary listed
    ConfigSet and describe it as active. Without one of those sources, stop and
    report that active configuration access is unavailable.
-2. Corroborate with `get_storage_health(timeRange="24h")` or the user's
-   supported window. Read the returned `data.status` and `data.metrics[]`
-   (`name`, `labels`, and `value`); the current tool exposes operation telemetry,
-   not eviction-age, disk-health, or key-location-map saturation fields. Ask the
-   operator for those measurements before making retention or hash-table claims.
+2. Corroborate with `get_storage_health(timeRange="24h")` or the user's supported window.
+   Read `data.assessment` and `data.metrics[]` (`name`, `labels`, `value`, `unit`,
+   `aggregation`). Retention comes from `eviction_age_min_shard`, hash-table pressure from
+   the `hash_*` rows, and blob sizes from `cas_blob_size_*`. Use `eviction_age_min_shard`
+   rather than `eviction_age`, and treat a tens-of-megabytes blob-size p50 as a histogram
+   bucket artifact rather than a real median. `references/infrastructure-tuning.md` has the
+   full metric table and both caveats.
 3. For stores on raw block devices the config cannot reveal the device size — ask
    the operator for the device or PVC size, then finish the arithmetic
    (block size = device bytes / total blocks; one block is the largest storable blob).
