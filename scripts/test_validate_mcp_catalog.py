@@ -32,6 +32,11 @@ class CatalogValidatorTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("legacy MCP alias is forbidden: GetInvocation", completed.stderr)
 
+    def test_rejects_retired_prompt(self) -> None:
+        completed = self.run_with_skill_suffix("\nUse `analyze_build`.\n")
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("absent from catalog: analyze_build", completed.stderr)
+
     def run_with_skill_suffix(self, suffix: str) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory(prefix="hermetiq-mcp-catalog-test-") as directory:
             root = Path(directory)

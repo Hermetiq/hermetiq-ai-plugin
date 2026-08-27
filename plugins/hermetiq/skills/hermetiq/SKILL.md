@@ -57,6 +57,9 @@ an envelope field.
 
 The catalog is deployment-aware:
 
+- `select_project` requires shared storage for the selection, so it is absent in
+  deployments without it. When absent, use the server-resolved project and
+  report that project switching is unavailable only if the user asks to switch.
 - Cache-event detail tools may be disabled. When present, start with
   `group_cache_events`, then call `find_cache_events` only if groups exist.
 - Kubernetes-backed tools such as `get_buildbarn_config`,
@@ -86,6 +89,12 @@ Two capability boundaries are hard rules:
   duration/status plus a recommendation. Do not add `get_build`, target,
   remote-execution, cache, parallelism, or invocation-detail calls merely to
   make the report more comprehensive.
+- For a known invocation ID, use the Slow Invocation playbook below. It starts
+  with `get_invocation(includeCommandLine=true)` so execution mode and the
+  effective `--jobs` ceiling can determine whether remote-capacity tools are
+  relevant, then reads `get_project.data.completedActionLogEnabled` before any
+  remote-action detail or parallelism call. This is intentionally distinct from
+  the bounded opaque-build flow.
 
 `analyze_buildbarn_storage` discovers which storage-related Buildbarn
 configuration files exist in the authorized namespace and flags secret-bearing
@@ -100,7 +109,7 @@ path, `search_buildbarn_config_schema` for discovery,
 `describe_buildbarn_config_type` for one type, and
 `list_buildbarn_config_roots` for service roots.
 
-Available prompts include `select_project`, `debug_cache_misses`, `analyze_build`,
+Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `invocation_insights`, `investigate_failure`, `diagnose_exec_environment`,
 `test_failures`, `project_health`,
 `cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
@@ -115,11 +124,34 @@ context and likewise are not tool calls.
 
 ## Project, Build, and Invocation Context
 
-- Project scope is server-controlled. Do not pass `projectId` or `project_id` to
-  analytics tools. If the user has not identified the intended project and the
-  choice matters, call `list_my_projects`, show the authorized choices, and ask
-  the host/user to select one. Never guess from an ID or treat a model-supplied
-  project as authorization.
+- **Analytics tools never take a project.** Do not pass `projectId` or
+  `project_id` to any of them; the schemas do not accept it and a model-supplied
+  project is never authorization. Every call reads the project the server
+  resolved for the authenticated user.
+- **Use the current project silently.** A request does not become ambiguous just
+  because the user did not name a project. Do not call `get_project` or
+  `list_my_projects`, ask the user to choose, or delay normal analysis merely to
+  confirm scope. The server already resolved the effective project.
+- **`select_project` is the one exception, and the only way to change project.**
+  Call it only when the user explicitly asks to switch or clear the current
+  selection. Use `list_my_projects` to resolve an authorized ID when needed;
+  ask a follow-up only when the requested name is genuinely ambiguous. The
+  target must be readable and have MCP access enabled. On-prem read access does
+  not require a physical membership row.
+- **Selection is sticky and account-wide.** A successful choice applies to later
+  calls, reconnects, and other conversations for the authenticated user until
+  its 12-hour expiry. Pass an empty `projectId` to clear it and return to default
+  resolution. Say which project is now active after an explicit switch, but do
+  not repeatedly reconfirm it during later analysis.
+- **When `select_project` is absent from `tools/list`**, the deployment cannot
+  store a selection. Continue using the resolved project normally and report
+  that switching is unavailable only in response to a switch request; there is
+  no alternate header-based MCP override.
+- **Default resolution is deterministic and requires no confirmation.** On-prem
+  uses the deployment's project marked `is_default`; Cloud uses the user's
+  normal membership-derived default. An expired, deleted, inaccessible, or
+  MCP-disabled sticky selection falls back to that default without requiring a
+  new choice from the user.
 - Prefer `list_builds` for user-facing history because it groups attempts by
   `buildId`. Use `list_invocations` when you need one attempt.
 - When the user gives an opaque ID from a URL or copied text, call
@@ -170,7 +202,8 @@ context and likewise are not tool calls.
 | User intent | Start with | Drill down with |
 |-------------|------------|-----------------|
 | What should I fix in this invocation? | `resolve_build_or_invocation`, `get_invocation_insights` | Validate `affectedItems` with `find_actions`, `find_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
-| Slow build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `get_invocation_insights`, `summarize_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
+| Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop when those three calls answer the request |
+| Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` when listed |
 | Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
 | Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
@@ -197,14 +230,20 @@ For cache, remote action, and target analysis, start grouped, then drill down:
 
 Work in this order unless the user's question is narrower:
 
-1. Invocation insights: if analyzing one invocation, call `get_invocation_insights`
+1. Invocation mode: for a known invocation, call
+   `get_invocation(includeCommandLine=true)` and read
+   `data.invocation.remoteExecutionEnabled` before selecting remote tools.
+2. Invocation insights: if analyzing one invocation, call `get_invocation_insights`
    and use it as the index of candidate fixes.
-2. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
-3. Critical path and parallelism: long sequential chains limit speedup.
-4. Queue wait: worker pool or scheduler saturation.
-5. Input fetch/output upload: large trees, large outputs, or storage contention.
-6. Slow actions: action outliers, low CPU efficiency, memory or I/O pressure.
-7. Infrastructure: Buildbarn scheduler, workers, storage, gRPC, and pod events.
+3. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
+4. Remote capacity: when remote execution is enabled, correlate remote-action
+   queueing and execution parallelism with scheduler telemetry and a numeric
+   `--jobs` ceiling before assigning a graph or worker bottleneck.
+5. Critical path: long sequential chains limit speedup when ready work and
+   scheduler capacity are not the constraint.
+6. Input fetch/output upload: large trees, large outputs, or storage contention.
+7. Slow actions: action outliers, low CPU efficiency, memory or I/O pressure.
+8. Infrastructure: Buildbarn scheduler, workers, storage, gRPC, and pod events.
 
 ### Invocation Insights and Profile Metrics
 
@@ -271,6 +310,13 @@ Interpret profile bottleneck labels as follows:
 ### Cache Effectiveness
 
 Use `summarize_cache_events` for a build and `get_cache_trends` for history.
+For one invocation, quote hit rate only with
+`data.aggregations.hitCount / data.aggregations.totalActions` (the observed
+remote Action Cache lookup denominator). Do not substitute
+`get_invocation.data.invocation.totalExecutions`
+or Bazel's local disk-cache counters. A zero-hit result explains why remote work
+had to execute, but a like-for-like cold-build comparison is still required to
+decide whether cache misses explain an unusual regression.
 
 | Hit rate | Assessment | Action |
 |----------|------------|--------|
@@ -302,6 +348,20 @@ action digest when command arguments or environment need confirmation.
 Use `analyze_remote_execution` for one invocation and `get_remote_action_trends`
 for cross-build trends.
 
+First confirm `data.invocation.remoteExecutionEnabled` from
+`get_invocation(includeCommandLine=true)`. When false, do not call remote-action,
+parallelism, or scheduler tools merely for completeness. When true, use
+`get_project` to read `data.completedActionLogEnabled`. When completed action
+logging is false, remote-action details and parallelism are unavailable: do not
+call `analyze_remote_execution` or `get_build_parallelism`, and do not interpret
+their absence as zero. Scheduler metrics remain independently available when
+listed, but the capacity diagnosis is lower confidence without the action
+timeline. When completed action logging is true, use
+`analyze_remote_execution.data.totalQueuedSeconds`, `queueWaitStats`, `stats`,
+`avgParallelism`, `uniqueWorkers`, and `workers` together with the execution
+timeline and scheduler window. A worker participating in the invocation proves
+only that it executed an action, not when its replica became ready.
+
 | Phase | Healthy | Warning | Critical | Usually means |
 |-------|---------|---------|----------|---------------|
 | Queue | <2s | 2-10s | >10s | Worker saturation |
@@ -331,17 +391,34 @@ CPU efficiency:
 Use `get_build_parallelism(bucketSeconds=5)` for one build and
 `get_critical_path_trends` for recurring bottlenecks.
 
-- Consistent high concurrency with gradual ramp-down is healthy.
-- Flat low concurrency suggests dependency chains, worker shortage, or a large
-  blocking action.
-- Bursts followed by idle periods suggest build graph phases or batching.
-- If peak parallelism never approaches `--jobs`, the graph is the limit. If queue
-  wait is high at peak, capacity is the limit.
+`get_build_parallelism` counts concurrently executing remote actions from
+worker start to worker completion. It does not count queued/runnable Bazel work,
+local actions, worker replicas, or available worker slots. `--jobs` is Bazel's
+upper bound on concurrent actions, not fleet capacity. Read it from the complete
+command line using last-wins semantics. If it is absent, `auto`, non-numeric, or
+the command line is missing/truncated, do not invent a numeric cap.
+
+| Observed evidence | Interpretation |
+|-------------------|----------------|
+| Low remote parallelism, low queue wait/depth | Build graph, lack of ready remote work, or one long action is the likely limit |
+| Low remote parallelism, high remote queue wait, scheduler backlog, few executing tasks | Scheduler or worker capacity is the likely limit, even when peak is far below `--jobs` |
+| Long initial queue, fixed low plateau, then stepwise concurrency and worker-participation growth | Capacity arrived late; slow autoscaling is a hypothesis |
+| Peak remains near a numeric `--jobs` cap while scheduler capacity is healthy | The client cap may bind; test a higher value rather than assuming |
+| Peak reaches `--jobs` while scheduler queueing is high | Do not raise `--jobs`; it would add queue pressure without worker capacity |
+
+Never call slow autoscaling proven from scheduler aggregates, remote-action
+parallelism, or `list_worker_pools`. Proving controller delay requires a
+time-aligned desired/available replica, readiness, or scale-event timeline.
 
 ### Buildbarn Infrastructure
 
 Start with `summarize_infrastructure_health` scoped to the invocation time window. If a
 component is `warning` or `critical`, drill into its tool.
+
+Invocation-scoped infrastructure tools query a padded project time window. They
+are time-correlated evidence and may include other activity; they do not return
+invocation-owned scheduler rows. `list_worker_pools` is a current snapshot, so
+never use it as the historical replica count for an earlier invocation.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
@@ -370,24 +447,58 @@ average execution time, average action cost, action count, or worker cost.
 
 ## Playbooks
 
-### Slow Build
+### Slow Build or Invocation
 
-1. Resolve the ID and summarize duration, status, attempts, command, platform, cache,
-   and remote execution flags.
-2. Call `get_invocation_insights` for the invocation attempt. Rank the top insights
-   by estimated savings, preserve caveats, and use `affectedItems` to choose the
-   next validation tool.
-3. Stop when build details and a returned insight already support the requested
-   diagnosis. Do not call both `get_build_details` and `get_build`, and do not run
-   every remaining step merely because it exists.
-4. When the current evidence specifically leaves cache effectiveness unresolved,
-   check `summarize_cache_events`. If hit rate is below 80%, cache misses are likely a
-   primary bottleneck.
-5. Check `analyze_remote_execution` only for a remote-execution timing hypothesis.
-6. Check `get_build_parallelism` only for a parallelism or critical-path hypothesis.
-7. Compare history with `list_builds`, `get_build_timeseries`, `summarize_project_trends`,
-   `get_profile_trends`, `get_cache_trends`, and `get_remote_action_trends`.
-8. If queue, fetch, upload, or infra errors are elevated, run the infrastructure flow.
+For an opaque build ID, preserve the bounded flow:
+`resolve_build_or_invocation` -> `get_build_details` ->
+`get_invocation_insights`. Stop when those calls provide the duration/status and
+a supported recommendation.
+
+For a known invocation ID:
+
+1. Call `get_invocation(includeCommandLine=true)` and
+   `get_invocation_insights`. Record duration/status, cache and remote-execution
+   counts, `data.invocation.remoteExecutionEnabled`, profile bottleneck evidence,
+   and insight caveats. Inspect the outer `truncated`/`truncatedFields` plus
+   `data.commandLineTruncated`.
+2. Resolve the last effective `--jobs` flag from the returned command-line
+   arrays. Use a numeric value only when the command line is complete. Treat an
+   absent flag as `auto`, and a missing, truncated, `auto`, or formula value as
+   an unknown numeric ceiling.
+3. When `summarize_cache_events` is listed, call it and report hit count, miss
+   count, hit rate, and the observed lookup denominator. Cache misses establish
+   how much work had to execute; compare like-for-like cold history before
+   assigning them the whole wall-time regression. If cache-event tools are not
+   listed, say that cache-event metrics are unavailable.
+4. When remote execution is false, skip `analyze_remote_execution`,
+   `get_build_parallelism`, and scheduler tools. Diagnose cache, profile, local
+   resource, critical-path, or analysis evidence instead.
+5. When remote execution is true, call `get_project` and read
+   `data.completedActionLogEnabled`. If it is false, report remote-action detail
+   and parallelism as unavailable rather than zero and skip
+   `analyze_remote_execution` and `get_build_parallelism`. If it is true, call
+   `analyze_remote_execution` and `get_build_parallelism(bucketSeconds=5)`.
+   Compare queue-wait totals and percentiles, actual execution/fetch/upload
+   time, the timestamped concurrency ramp and peak, and worker participation
+   against only a numeric `--jobs` ceiling.
+6. When remote execution is true and `get_scheduler_health` is listed, call it
+   with the same `invocationId`, whether or not completed action logging is on.
+   Correlate queue depth/duration, executing and queued rates, and platform or
+   size-class breakdown over its returned start/end window. When it is absent,
+   say scheduler telemetry is unavailable. When completed action logging is
+   off, lower confidence because scheduler data cannot be paired with the
+   remote-action timeline.
+7. Classify the evidence with the Parallelism and Critical Path matrix. High
+   queueing plus low executing parallelism supports worker/scheduler capacity;
+   low queueing plus low parallelism supports the graph or lack of ready work.
+   A late stepwise ramp is consistent with slow autoscaling, but call it proven
+   only when replica/readiness or scale-event history shows capacity arriving
+   after queue growth.
+8. Compare a fast and slow like-for-like invocation when deciding whether the
+   result is a regression rather than the normal cold-build cost.
+9. Rank findings by observed wall-time impact. Keep Action Cache misses,
+   scheduler queueing, and slow individual actions separate rather than making
+   one explain the entire duration.
 
 ### Cache Hit Rate Improvement
 

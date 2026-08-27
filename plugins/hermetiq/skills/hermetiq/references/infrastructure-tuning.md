@@ -196,6 +196,39 @@ per action type, using an Initial Size Class Cache. Routes small compilations to
 **Signal this could help**: High cost variance within the same mnemonic — actions that finish
 in 2 seconds on a large worker but 30 seconds on a small one.
 
+### Autoscaling and Capacity Arrival
+
+Diagnose capacity arrival from time-aligned evidence rather than from one peak.
+For a known invocation with remote execution enabled:
+
+1. Read a complete command line with `get_invocation(includeCommandLine=true)`
+   and extract the last effective numeric `--jobs` value. `--jobs` is a client
+   ceiling, not worker capacity.
+2. Call `get_project` and read `data.completedActionLogEnabled`. If it is false,
+   remote-action details and parallelism are unavailable; skip the next two
+   action-data steps and do not interpret missing rows as zero.
+3. Use `analyze_remote_execution` for invocation-owned queue totals,
+   `queueWaitStats`, phase timing, and worker participation.
+4. Use `get_build_parallelism(bucketSeconds=5)` for the executing remote-action
+   ramp. It does not count queued/runnable work, replicas, or available slots.
+5. Use `get_scheduler_health(invocationId=...)` when listed. Its padded project
+   window may include other activity, so correlate rather than attribute.
+
+| Pattern | Supported conclusion |
+|---------|----------------------|
+| Low executing parallelism + low queueing | Graph, lack of ready remote work, or a long action is likely limiting |
+| Low executing parallelism + high queue duration/depth + few executing tasks | Scheduler/worker capacity is likely limiting |
+| Long initial queue + fixed low concurrency plateau + later stepwise ramp | Capacity arrived late; slow autoscaling is plausible |
+| One worker handles most actions while several others handle only a small tail | Later worker participation supports the late-capacity hypothesis |
+
+The last two patterns do not prove autoscaler behavior. `list_worker_pools` is a
+live desired/available snapshot, and remote-action worker rows show participation
+only. Require historical desired/available replica, readiness, or controller
+scale-event telemetry before stating that an autoscaler reacted slowly. If that
+history is unavailable, label the conclusion medium confidence and recommend
+instrumenting the scale decision, pod scheduling, image pull, and readiness
+timeline separately.
+
 ---
 
 ## Diagnosing Infrastructure-Related Build Regressions

@@ -191,12 +191,13 @@ Profile bottleneck glossary:
 - These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
 ### CacheEventAgg (per-invocation)
-- `data.totalActions`, `data.hitCount`, `data.missCount`, `data.hitRate`
-- `data.byMnemonic` — Per-action-type breakdown
-- `data.byInstance` — Per-cache-instance breakdown
-- `data.topMissTargets` — Targets with most misses
-- `data.slowestActions` — Highest cache lookup latency
-- `data.byMissReason` — Count per reason category
+- `data.aggregations.totalActions`, `data.aggregations.hitCount`,
+  `data.aggregations.missCount`, `data.aggregations.hitRate`
+- `data.aggregations.byMnemonic` — Per-action-type breakdown
+- `data.aggregations.byInstance` — Per-cache-instance breakdown
+- `data.aggregations.topMissTargets` — Targets with most misses
+- `data.aggregations.slowestActions` — Highest cache lookup latency
+- `data.aggregations.byMissReason` — Count per reason category
 
 ### CacheTrends (cross-build, time-windowed)
 - `data.summary` — Total lookups, hit rate, average latency over the period

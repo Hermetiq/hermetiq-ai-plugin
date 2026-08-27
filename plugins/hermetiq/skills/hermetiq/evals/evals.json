@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "skillName": "hermetiq",
-  "catalogVersion": "0.12.0",
+  "catalogVersion": "0.16.0",
   "baseline": {
     "source": "cloud-native/bep-nats/mcpv2/evals/*.json before the coordinated skill migration",
     "cases": 23,
@@ -27,6 +27,8 @@
       "BUILD_ID",
       "INVOCATION_ID",
       "FAILURE_INVOCATION_ID",
+      "REMOTE_EXEC_INVOCATION_ID",
+      "LOCAL_INVOCATION_ID",
       "CONFIG_SET_NAME",
       "REQUEST_ID"
     ]
@@ -50,9 +52,31 @@
       "expectedMcpSequence": ["resolve_build_or_invocation", "get_build_details", "get_invocation_insights"],
       "expectedFirstCall": {"tool": "resolve_build_or_invocation", "arguments": {"id": "${BUILD_ID}"}},
       "maximumUnnecessaryCalls": 0,
-      "expectedBehavior": ["resolves the opaque ID before selecting a detail tool", "uses the returned invocation ID for insights"],
+      "expectedBehavior": ["uses the server-resolved current project without asking the user to select one", "does not call list_my_projects, get_project, or select_project before analysis", "resolves the opaque ID before selecting a detail tool", "uses the returned invocation ID for insights"],
       "evidence": ["cites a returned duration or status", "cites a returned insight or explicitly reports that none exists"],
       "expectedFinalPatterns": ["noslim[_ ]profile|duration|seconds?"]
+    },
+    {
+      "id": "remote-capacity-diagnosis",
+      "category": "remote_capacity",
+      "prompt": "Use the Hermetiq skill. Diagnose whether known invocation ${REMOTE_EXEC_INVOCATION_ID} was slow because remote worker capacity arrived late. Start from the invocation, inspect its effective --jobs setting, report the cache baseline, and then follow the remote-capacity branch without broadening into cache drill-down or project-history analysis. Distinguish observed scheduler/parallelism evidence from autoscaler causality.",
+      "expectedMcpSequence": ["get_invocation", "get_invocation_insights", "summarize_cache_events", "get_project", "analyze_remote_execution", "get_build_parallelism", "get_scheduler_health"],
+      "expectedFirstCall": {"tool": "get_invocation", "arguments": {"includeCommandLine": true, "invocationId": "${REMOTE_EXEC_INVOCATION_ID}"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["reads remoteExecutionEnabled before selecting remote tools", "reports cache hits and misses with the observed lookup denominator", "reads get_project.completedActionLogEnabled before remote-action detail or parallelism", "compares remote-action concurrency with a numeric --jobs ceiling only when command-line data is complete", "does not claim autoscaling is proven without replica or scale-event history"],
+      "evidence": ["cites returned cache hit and miss counts", "cites returned remote queue timing", "cites the remote-action parallelism ramp or peak", "cites scheduler telemetry over its returned window"],
+      "expectedFinalPatterns": ["cache", "hits?|miss", "completed action|action log", "--jobs|jobs", "queue", "parallel|concurr", "autoscal.*(hypothesis|consistent|plausible|not proven|cannot prove)|cannot prove.*autoscal"]
+    },
+    {
+      "id": "remote-execution-disabled-guard",
+      "category": "remote_disabled",
+      "prompt": "Use the Hermetiq skill. Analyze known invocation ${LOCAL_INVOCATION_ID}. It is a fixture whose get_invocation result reports remote execution disabled. Follow the known-invocation recipe and do not call remote execution, remote-action parallelism, or scheduler tools after confirming that state.",
+      "expectedMcpSequence": ["get_invocation", "get_invocation_insights", "summarize_cache_events"],
+      "expectedFirstCall": {"tool": "get_invocation", "arguments": {"includeCommandLine": true, "invocationId": "${LOCAL_INVOCATION_ID}"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["reads remoteExecutionEnabled", "reports cache hits and misses with the observed lookup denominator", "does not call analyze_remote_execution, get_build_parallelism, or get_scheduler_health"],
+      "evidence": ["states that remote execution was disabled using the invocation result", "cites returned cache hit and miss counts"],
+      "expectedFinalPatterns": ["cache", "remote execution.*(disabled|not enabled)|disabled.*remote execution"]
     },
     {
       "id": "cache-drilldown",

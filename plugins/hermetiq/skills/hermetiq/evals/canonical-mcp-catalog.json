@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
   "server": "hermetiq-mcp-v2",
-  "serverVersion": "0.14.0",
+  "serverVersion": "0.16.0",
   "tools": [
     "analyze_build_targets",
     "analyze_buildbarn_storage",
@@ -71,6 +71,7 @@
     "resolve_build_or_invocation",
     "save_config_set",
     "search_buildbarn_config_schema",
+    "select_project",
     "summarize_build_history",
     "summarize_cache_events",
     "summarize_infrastructure_health",
@@ -79,7 +80,7 @@
   ],
   "allowlist": {
     "prompts": [
-      "analyze_build",
+      "analyze_invocation",
       "analyze_storage_config",
       "cache_trends",
       "compare_periods",
@@ -94,7 +95,6 @@
       "project_health",
       "rbe_optimization",
       "rbe_trends",
-      "select_project",
       "setup_hermetiq_bazel",
       "test_failures",
       "weekly_trends_report"
