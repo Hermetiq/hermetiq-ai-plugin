@@ -62,7 +62,7 @@ The catalog is deployment-aware:
   report that project switching is unavailable only if the user asks to switch.
 - Cache-event detail tools may be disabled. When present, start with
   `group_cache_events`, then call `find_cache_events` only if groups exist.
-- Kubernetes-backed tools such as `get_buildbarn_config`,
+- Kubernetes-backed tools such as `get_buildbarn_status`, `get_buildbarn_config`,
   `analyze_buildbarn_storage`, and `list_worker_pools` appear only when the
   server has Kubernetes access. `get_worker_scaling_timeline` additionally
   requires infrastructure metrics and appears only when both capabilities are
@@ -216,7 +216,8 @@ context and likewise are not tool calls.
 | Build trends | `summarize_build_history` or `summarize_project_trends` | `get_build_timeseries`, `get_cache_trends`, `get_profile_trends`, `get_remote_action_trends` |
 | Profile trends or "where did time go?" | `get_profile_trends(lookback="7d")` | `get_critical_path_trends`, `get_remote_action_trends`, `get_cache_trends`, infra tools only when profile metrics point there |
 | Time-period comparison | `summarize_project_trends` | `get_remote_action_trends`, `get_cache_trends`, `get_target_trends` |
-| Infrastructure bottleneck | `summarize_infrastructure_health` | `get_scheduler_health`, `get_storage_health`, `get_worker_fleet_health`, `get_grpc_health` |
+| Infrastructure bottleneck | `summarize_infrastructure_health` | `get_scheduler_health`, `get_storage_health`, `get_worker_fleet_health`, `get_grpc_health`, `get_buildbarn_status` to establish the topology the metrics describe |
+| "What Buildbarn do I have / is it up?" | `get_buildbarn_status` | `list_worker_pools`, `get_buildbarn_config`; the user may have no cluster access, so never answer this from kubectl |
 | Cost reduction | `get_remote_action_trends(lookback="30d")` | `analyze_remote_execution`, `get_cost_summary` |
 | Remote action detail | `group_remote_actions` | `find_remote_actions`, `get_remote_action_command` |
 | Target trends | `get_target_trends` | `get_target_trend_detail`, `list_targets` |
@@ -477,6 +478,7 @@ remote-action concurrency and not a count of available worker slots or replicas.
 |---------|------|-----------------|--------|
 | High queue time | `get_scheduler_health` | `scheduler_queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown` | Scale or rebalance workers |
 | Suspected late capacity | `get_worker_scaling_timeline` | time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
+| Unknown or unverified deployment shape | `get_buildbarn_status` | `data.status`, `data.assessment`, `data.chart`, `data.storageShards`, per-component `role`/`kind`/`readyReplicas`/`images` | Establish what is installed before reading metrics; `storageShards` is what per-shard storage series key on, so it separates a real shard from a worker-local cache series |
 | Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
 | Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
 | gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes |
