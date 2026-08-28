@@ -26,6 +26,7 @@
     "get_buildbarn_config",
     "get_buildbarn_config_field",
     "get_buildbarn_pod_logs",
+    "get_buildbarn_status",
     "get_cache_trends",
     "get_config_set",
     "get_config_set_history",
