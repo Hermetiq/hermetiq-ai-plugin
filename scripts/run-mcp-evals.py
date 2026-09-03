@@ -157,6 +157,20 @@ def validate_input(arguments: Any, schema: dict[str, Any]) -> tuple[bool, str]:
     return True, "schema-valid"
 
 
+def final_pattern_failures(case: dict[str, Any], final: str) -> tuple[list[str], list[str]]:
+    """Return required patterns that are missing and forbidden patterns that are present."""
+    flags = re.IGNORECASE | re.DOTALL
+    missing = [
+        pattern for pattern in case.get("expectedFinalPatterns", [])
+        if re.search(pattern, final, flags=flags) is None
+    ]
+    forbidden = [
+        pattern for pattern in case.get("forbiddenFinalPatterns", [])
+        if re.search(pattern, final, flags=flags) is not None
+    ]
+    return missing, forbidden
+
+
 def run_case(
     case: dict[str, Any],
     args: argparse.Namespace,
@@ -261,11 +275,8 @@ def run_case(
             and mutation_calls[0]["arguments"].get("confirmMutation") is True
         )
 
-    missing_patterns = [
-        pattern for pattern in case.get("expectedFinalPatterns", [])
-        if re.search(pattern, final, flags=re.IGNORECASE | re.DOTALL) is None
-    ]
-    evidence_passed = bool(final.strip()) and not missing_patterns
+    missing_patterns, forbidden_patterns = final_pattern_failures(case, final)
+    evidence_passed = bool(final.strip()) and not missing_patterns and not forbidden_patterns
     passed = all(
         [
             completed.returncode == 0,
@@ -301,6 +312,7 @@ def run_case(
             "mutationSafety": mutation_passed,
             "evidenceQuality": evidence_passed,
             "missingEvidencePatterns": missing_patterns,
+            "forbiddenEvidencePatterns": forbidden_patterns,
             "legacyToolNameCalls": legacy_calls,
             "legacyToolNameMentions": legacy_final_names,
         },

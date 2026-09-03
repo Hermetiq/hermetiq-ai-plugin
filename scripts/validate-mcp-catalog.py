@@ -107,6 +107,11 @@ def validate_docs(catalog: dict[str, Any], errors: list[str]) -> None:
 
 def validate_eval_suite(catalog: dict[str, Any], server: dict[str, Any] | None, errors: list[str]) -> None:
     suite = load_json(EVALS)
+    if suite.get("catalogVersion") != catalog.get("serverVersion"):
+        errors.append(
+            "eval catalog version drift: "
+            f"suite={suite.get('catalogVersion')} plugin={catalog.get('serverVersion')}"
+        )
     tools = set(catalog["tools"])
     cases = suite.get("evals", [])
     required_categories = {
@@ -135,6 +140,17 @@ def validate_eval_suite(catalog: dict[str, Any], server: dict[str, Any] | None, 
 
     for case in cases:
         label = f"eval {case.get('id', '<missing id>')}"
+        for field in ("expectedFinalPatterns", "forbiddenFinalPatterns"):
+            patterns = case.get(field, [])
+            if not isinstance(patterns, list) or any(not isinstance(pattern, str) for pattern in patterns):
+                errors.append(f"{label}: {field} must be a list of strings")
+                continue
+            for pattern in patterns:
+                try:
+                    re.compile(pattern)
+                except re.error as error:
+                    errors.append(f"{label}: invalid {field} pattern {pattern!r}: {error}")
+
         sequence = case.get("expectedMcpSequence")
         if not isinstance(sequence, list):
             errors.append(f"{label}: expectedMcpSequence must be a list")

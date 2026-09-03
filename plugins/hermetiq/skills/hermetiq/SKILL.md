@@ -188,20 +188,24 @@ context and likewise are not tool calls.
   `exitCode` is absent, not 0, whenever the backend recorded none. No `status`
   filter can select `unknown`, so a filtered count can add up to less than the
   unfiltered total — say so rather than calling it a discrepancy.
-- Build summaries carry five counts that together account for
+- Per-build `BuildSummary` objects returned by `list_builds`, `get_build`, and
+  `get_build_details` carry five counts that together account for
   `invocationCount`: `successCount`, `failureCount`, `interruptedCount`,
   `inProgressCount`, and `unknownCount`. Never present the first four as the
-  whole build.
+  whole build. The aggregate `summarize_build_history` response is different:
+  it has `totalBuildCount` and the first four outcome counters, but no
+  `unknownCount` or `invocationCount`, so its counters can sum below the total.
 - The `status` filter vocabulary for `list_builds`, `list_invocations`,
   `summarize_build_history`, `get_build_timeseries`,
   `summarize_invocation_timeseries`, and `get_invocation_timeseries` is
   `success` (alias `ok`), `failed` (aliases `error`, `failure`), `remote_error`,
   `in_progress`, and `interrupted`. `remote_error` is a strict subset of
-  `failed` — exit 34 or that exit-code name — not a synonym for it, so
-  `status="remote_error"` now isolates exactly the "no worker advertised the
-  requested platform" population used in the Remote Execution Environment
-  Mismatch playbook. Aggregated trend tools take the same values in a `statuses`
-  array.
+  `failed` — numeric Bazel exit code 34 — not a synonym for it. It identifies
+  the general `REMOTE_ERROR` outcome population; it does not by itself prove
+  that no worker advertised the requested platform. That diagnosis additionally
+  requires zero remote executions, matching failure-message evidence, and the
+  requested platform. Aggregated trend tools take the same values in a
+  `statuses` array.
 - When the user gives an opaque ID from a URL or copied text, call
   `resolve_build_or_invocation`.
 - Use `buildId` with single-build tools: `get_build`, `get_build_details`,
@@ -785,11 +789,15 @@ code bugs, flakes, or resource exhaustion.
    `references/REFERENCE.md` under bb-runner; a binary needing `GLIBC_2.34` cannot run on
    any glibc 2.31 image.
 6. Find the regression boundary. `list_builds` filtered to the repository gives the last
-   success and the commit delta since. `REMOTE_ERROR` with zero remote executions means no
-   worker advertised the requested platform at all; `BUILD_FAILURE` with nonzero remote
-   executions means it matched, ran, and failed in the wrong userspace. `REMOTE_ERROR`
-   flipping to `BUILD_FAILURE` across a rollout is the fingerprint of an advertised property
-   bumped without the runner image.
+   success and the commit delta since. Treat `REMOTE_ERROR` as a general remote-system
+   outcome. Conclude that no compatible worker advertised the requested platform only when
+   the invocation also has zero remote executions, its failure message explicitly reports
+   that no worker matched or supported the platform, and you have recorded the requested
+   platform. `BUILD_FAILURE` with nonzero remote executions means work matched and ran before
+   failing; combine that with the loader evidence above before calling it the wrong userspace.
+   A supported transition from no-worker `REMOTE_ERROR` evidence to userspace
+   `BUILD_FAILURE` across a rollout is the fingerprint of an advertised property bumped
+   without the runner image.
 7. Report the requested environment, the actual environment, the specific missing symbol or
    library, and which side is stale. Then list every place the platform identity is declared
    that must move together — advertised worker properties, scheduler routes keyed on the

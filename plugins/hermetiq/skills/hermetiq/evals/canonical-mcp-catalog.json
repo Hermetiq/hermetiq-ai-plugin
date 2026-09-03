@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
   "server": "hermetiq-mcp-v2",
-  "serverVersion": "0.17.0",
+  "serverVersion": "0.18.0",
   "tools": [
     "analyze_build_targets",
     "analyze_buildbarn_storage",

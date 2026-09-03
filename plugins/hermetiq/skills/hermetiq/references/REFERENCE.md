@@ -12,10 +12,13 @@
 - Build history tools accept bounded public filters directly: `lookback`, `repository`,
   `branch`, `command`, and `status`. The `status` vocabulary is `success` (alias `ok`),
   `failed` (aliases `error`, `failure`), `remote_error`, `in_progress`, and `interrupted`.
-  `remote_error` is a strict subset of `failed` — exit 34 or that exit-code name — not an
-  alias for it, and no value selects an `unknown` invocation. Aggregated trend tools take the
-  same values in a `statuses` array, and `list_filter_values(field="status")` returns this
-  static vocabulary. Do not construct protobuf filter or aggregation objects.
+  `remote_error` is a strict subset of `failed` — numeric Bazel exit code 34 — not an alias
+  for it, and no value selects an `unknown` invocation. It denotes a general remote-system
+  outcome, not specifically a missing compatible worker. That diagnosis also requires zero
+  remote executions, matching failure-message evidence, and the requested platform.
+  Aggregated trend tools take the same values in a `statuses` array, and
+  `list_filter_values(field="status")` returns this static vocabulary. Do not construct
+  protobuf filter or aggregation objects.
 - `get_invocation_insights` is invocation-scoped. It exposes the current typed recommendation
   schema for the same profile-derived action-plan surface that `get_invocation` also surfaces
   under `data.profile.insights`, without loading the full invocation payload.
@@ -155,31 +158,24 @@ comparable with `metrics.actionsCreated`, and `actionsTruncated` is set whenever
 account for fewer actions than `actions.total`. Never present a byMnemonic total as the
 invocation's action count.
 
-### InvocationProfileMetrics and Profile Insights
-Parsed Bazel JSON trace profile summary for one invocation. It lets agents explain where time
-went without reconstructing a profile from raw trace events.
+### Invocation profile and profile insights
+`get_invocation` exposes a compact, model-facing Bazel JSON trace profile under
+`data.profile`. It lets agents explain the broad time split without reconstructing raw trace
+events.
 
-Key fields:
-- `buildWallTimeMicros`, `analysisPhaseMicros`, `executionPhaseMicros` — wall-time
-  anatomy for the invocation.
-- Remote phase totals: `remote_queue_micros`, `remote_fetch_micros`,
-  `remote_process_micros`, `remote_upload_micros`, `remote_output_download_micros`, and
-  `remote_cache_check_micros`.
-- Merkle-tree and `findMissingDigestsMicros` timing — local/client-side work before remote cache
-  or execution requests.
-- `critical_path_micros`, `critical_path_component_count`, `critical_path_execution_ratio`,
-  and `critical_path_queue_micros` — critical-path shape and whether the slow path is queue or
-  execution heavy.
-- `bottleneckKind` / `bottleneckRatio` — server-classified dominant bottleneck and share.
-- `effectiveParallelism` — action work divided by build wall time; use with
-  `get_build_parallelism` to distinguish low graph parallelism from worker capacity limits.
-- `gc_count`, `gc_total_micros`, `gc_max_micros`, plus `resource_metrics` — client resource
-  pressure signals.
-- `timeline_segments`, `timeline_events`, `phase_metrics`, `remote_phase_metrics`,
-  `mnemonic_metrics`, and `hotspot_metrics` — profile-derived timeline and hotspot detail.
-- `insights` — older embedded `ProfileInsight` records for single-invocation recommendations.
-  Prefer `get_invocation_insights` for the current typed insight schema when only the action plan
-  is needed.
+Exact fields:
+- `bazelVersion`
+- `wallTimeSeconds`, `analysisSeconds`, `executionSeconds`
+- `remoteExecutionSeconds`, `remoteQueueSeconds`, `criticalPathSeconds`, `gcSeconds`
+- `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
+- `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
+  `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
+  `caveats`
+
+Raw microsecond phase fields, fetch/upload/output-download subphases, GC counts, resource
+arrays, timeline segments, and hotspot arrays are not exposed in this payload. Use the trend or
+dedicated drill-down tools when those surfaces are needed. Prefer `get_invocation_insights` for
+the current typed insight schema when only the action plan is needed.
 
 `get_invocation_insights` returns typed records under `data.insights`:
 - `insightId` — stable key for dedupe and per-rule links.
@@ -233,12 +229,14 @@ Profile bottleneck glossary:
 
 ### Build History (logical build grouping)
 - `list_builds` — grouped build rows with primary invocation, attempt counts, status rollups,
-  cache/execution totals, and pagination.
-- `summarize_build_history` — total logical builds plus success, failure, interrupted,
-  in-progress, and unknown counts over the selected build universe. On any build summary
-  `successCount + failureCount + interruptedCount + inProgressCount + unknownCount` accounts
-  for `invocationCount`; no status filter can select `unknown`, so a filtered total can be
-  smaller than the unfiltered one.
+  cache/execution totals, and pagination. Each `BuildSummary` row (also used by build-detail
+  surfaces) exposes `invocationCount`, `successCount`, `failureCount`, `interruptedCount`,
+  `inProgressCount`, and `unknownCount`; those five outcome counters account for every attempt.
+- `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` with exactly
+  `totalBuildCount`, `successCount`, `failureCount`, `interruptedCount`, and
+  `inProgressCount`. It has neither `unknownCount` nor `invocationCount`, so do not apply the
+  per-build five-counter invariant to this response. Its outcome counters can sum below
+  `totalBuildCount` when a logical build has only unknown attempts.
 - `get_build_timeseries` — build counts bucketed by time with build-level status rollups.
 - These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
