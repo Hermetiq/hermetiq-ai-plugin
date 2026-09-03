@@ -10,14 +10,19 @@ Jsonnet/ConfigMap content before making config-specific recommendations.
 ## Storage Tuning
 
 Use `analyze_buildbarn_storage` when it is registered (requires Kubernetes access) to
-**discover which config files exist** and flag secret-bearing keys. It does not validate
-storage geometry or configuration correctness — its own description says so, and it commonly
-returns `findings: []` for a perfectly ordinary deployment. Treat it as a file index, then
-read the files it names with `get_buildbarn_config(component=...)` and do the geometry
-yourself. Run discovery without a `store` filename filter, then identify CAS, AC, ISCC, and
-FSAC stores from the returned configuration content. A filename substring or requested store
-label is not evidence of the configured store type; apply that focus only after mapping the
-content. If it is absent, use `get_buildbarn_config` only when that tool is also present
+**discover which config files the running Buildbarn workloads actually mount or read** and to
+flag secret-bearing keys. It does not validate storage geometry or configuration correctness —
+its own description says so, and it commonly returns `findings: []` for a perfectly ordinary
+deployment. Treat it as a file index, then read the files it names with
+`get_buildbarn_config(component=...)` and do the geometry yourself. By default it analyzes only
+mounted ConfigMaps: orphaned generations such as kustomize hash-suffixed copies are excluded
+unless you pass `includeUnmounted=true`, so read `data.scope`, `data.scopeReason`, and each
+entry's `mounted` field before calling anything the deployed configuration. Run discovery
+without a `store` filter, then take the CAS, AC, ISCC, and FSAC mapping from
+`data.configurations[].stores` with the `data.configurations[].fields` that established it. The
+`store` argument matches semantic configuration fields, not filenames; a filename substring or a
+requested store label is still not evidence of the configured store type, so apply that focus
+only after the mapping. If it is absent, use `get_buildbarn_config` only when that tool is also present
 in tools/list; otherwise ask the operator for the storage/frontend/common ConfigMap Jsonnet
 or use ConfigSets tools when present, and label the result as config-supplied rather than
 live-cluster verified. The underlying model lives in the MCP resource
@@ -33,12 +38,15 @@ blob locations and never grows.
 
 **`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter;
 omit it to get both). The payload exposes `data.projectId`, `data.start`, `data.end`,
-`data.status`, `data.assessment`, and `data.metrics[]`. Each metric row carries `name`,
-`labels`, `value`, `unit`, and `aggregation`.
+`data.status`, `data.assessment`, `data.assessmentReason`, and `data.metrics[]`. Each metric
+row carries `name`, `labels`, `value`, `unit`, and `aggregation`.
 
 `data.assessment` is `healthy`, `degraded`, `critical`, or `no_data`, computed server-side
-from eviction age, CAS error rate, and key-location-map pressure. Report it, but always cite
-the underlying metric that drove it rather than the verdict alone.
+from eviction age, the **worse of `cas_error_rate_pct` and `ac_error_rate_pct`**, and
+key-location-map pressure. `data.assessmentReason` names the rows, values, and thresholds it
+used — quote it with the verdict rather than the verdict alone. `get_scheduler_health`,
+`get_worker_fleet_health`, `get_grpc_health`, and `summarize_infrastructure_health` all return
+the same `assessment` + `assessmentReason` pair.
 
 **Never compare two metrics with different `aggregation` values.** `peak` is the highest
 1-minute rate in the window, `average` is the mean over it, `instant` is a gauge read at the
@@ -59,7 +67,7 @@ Metric names, per storage type (`cas_` / `ac_` prefix; `operation_rate` alone co
 | `eviction_age_by_shard` | hours, instant | Per shard, in `labels.kubernetes_shard` |
 | `eviction_age_min_shard` | hours, derived | **The value the assessment uses** |
 | `hash_{get_too_many_attempts,put_too_many_iterations,put_ignored_invalid}` | ops/sec, peak | Key-location-map saturation |
-| `eviction_set_ops` | per hour, instant | Eviction-set activity by service and cache name |
+| `eviction_set_ops` | ops/sec, instant | Eviction-set activity by service and cache name. The recording rule is named `rate1h`, but that names the rule's lookback, not the result's unit — it is a per-second rate like every other rate row here, and reading it as per-hour overstates eviction pressure 3600-fold. It carries no `storage_type` dimension, so `storageType` does not restrict it and it stays cluster-wide |
 
 Two reading caveats:
 
@@ -155,6 +163,8 @@ and memory.
    - Consistently >85% → concurrency too high, actions contend for CPU.
    - Consistently <50% → concurrency too low, worker capacity wasted.
 2. `list_buildbarn_events`: out-of-memory kills → concurrency × per-action memory exceeds limit.
+   Records come back newest first with `hasMore` reporting whether older matches in the window
+   were left out, so raise `limit` or narrow `timeRange` rather than concluding from a full page.
 3. High execution time variance within the same mnemonic → resource contention.
 
 **Starting point**: `concurrency = vCPU count - 1` (headroom for the worker process).
@@ -262,7 +272,12 @@ For a known invocation with remote execution enabled:
    Compare only the remote-action concurrency series against a numeric `--jobs`.
 6. Use `get_worker_scaling_timeline(invocationId=...)` when listed. Align its
    desired, available, and ready replica series with the invocation-owned queue
-   and concurrency timeline. Missing or incomplete series leave slow autoscaling
+   and concurrency timeline. Its `data.metrics[].points` are change points of a
+   step function: each value holds until the next point and equal consecutive
+   samples are not repeated, so a short list of points is a complete series
+   rather than a sparse one — do not count points as a coverage test.
+   `data.currentSnapshot` with `data.snapshotAt` is a present-time reading, not
+   history. Missing or incomplete series leave slow autoscaling
    unproven; an explicit scale-events-unavailable field is a coverage caveat,
    not evidence that no scale event occurred. When `data.scaleEventsStatus` is
    `available_separately` and `list_buildbarn_events` is listed, call it with the
@@ -308,6 +323,8 @@ When builds get slower and the cause is not cache-related or code-related:
    `execution_stage_{p50,p90,p99}` for stage timing and the `rss_p90`, `cpu_*_p90`,
    `block_io_*_p90`, and `file*_p90` rows for resource ceilings.
    Use `list_buildbarn_events` for out-of-memory kills during the build window when listed.
+   Records come back newest first with `hasMore` reporting whether older matches in the window
+   were left out, so raise `limit` or narrow `timeRange` rather than concluding from a full page.
 4. **Scheduler**: `get_scheduler_health` → Queue depth growing? Specific platforms backed up?
 5. **Network**: `get_grpc_health` → Error rates or latencies elevated between components?
 6. **Configuration**: `get_buildbarn_config` → Has anything changed? Compare concurrency, storage

@@ -17,6 +17,10 @@ an opaque ID, call `resolve_build_or_invocation` first and use the returned
   `--remote_download_minimal`, and `--jobs`.
 - **Platform settings**: `platformName` and `cpu` show the target platform. Remote execution
   and remote cache fields show which remote features are enabled.
+- **Outcome**: read `data.invocation.status` — always present, one of `success`, `failed`,
+  `interrupted`, `in_progress`, `unknown` — never `exitCode`, which is absent rather than 0
+  when the backend recorded none. When comparing a drifted configuration against a working
+  one, exclude `unknown` invocations rather than counting them as successes.
 - **Build tool version**: `buildToolVersion` reveals the Bazel version.
 - **User and host**: `user` and `host` identify who ran the build and from where.
 
@@ -57,7 +61,7 @@ recommend adding it to the project's shared `.bazelrc`:
 | `--nostamp` | Disables volatile timestamp/git-SHA embedding | `INPUT_CHANGED` misses on stamped targets; volatile workspace status in command line |
 | `--noexperimental_check_external_repository_files` | Avoids unnecessary re-fetching of external repos | Slow analysis phase; cache misses after repository fetch |
 | `--experimental_remote_cache_compression` | Compresses Content Addressable Storage transfers | High input fetch and output upload times with moderate blob sizes |
-| `--remote_download_minimal` | Only downloads outputs needed locally | High bytes received in build metrics; long output download phases |
+| `--remote_download_minimal` | Only downloads outputs needed locally | `get_invocation.data.profile.bottleneckKind == "output_download_bound"`, or an `output_download_bound` classification from `get_profile_trends`. Do **not** use `metrics.bytesReceived` — it is a whole-host network counter for the machine that ran the build, not Bazel remote-cache traffic |
 
 ## Remote Execution Flag Tuning
 
