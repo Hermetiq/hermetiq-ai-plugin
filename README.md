@@ -117,21 +117,25 @@ https://mcp.cloud-usc1.hermetiq.io
 
 > Self-hosted? Use your on-prem MCP endpoint instead (e.g. `https://mcp.hermetiq.your-domain.example`).
 
-### 2. Package and upload the skill
+### 2. Package and upload the skills
 
 ```bash
 git clone https://github.com/Hermetiq/hermetiq-ai-plugin
 cd hermetiq-ai-plugin/plugins/hermetiq/skills
 zip -r hermetiq.zip hermetiq/
+zip -r on-prem-gke-install.zip on-prem-gke-install/
 ```
 
-> The zip must preserve the folder structure — it should contain `hermetiq/SKILL.md`, not a bare `SKILL.md` at the root.
+> Each zip must preserve its folder structure — for example,
+> `hermetiq.zip` contains `hermetiq/SKILL.md`, not a bare `SKILL.md` at the
+> root. Upload both archives to install the supported build-analysis and
+> on-premises GKE installation skills.
 
 Then in Claude Desktop:
 
 1. Go to **Customize > Skills**
 2. Click **+** > **Upload a skill**
-3. Select `hermetiq.zip`
+3. Select `hermetiq.zip`, then repeat for `on-prem-gke-install.zip`
 
 This standalone uploaded skill is invoked as `/hermetiq`; the
 `/hermetiq:hermetiq` namespace above applies to the marketplace plugin install.
@@ -169,8 +173,9 @@ codex mcp login hermetiq
 ```bash
 git clone https://github.com/Hermetiq/hermetiq-ai-plugin
 cd hermetiq-ai-plugin
-mkdir -p ~/.codex/skills/hermetiq
-cp -R plugins/hermetiq/skills/hermetiq/* ~/.codex/skills/hermetiq/
+mkdir -p ~/.codex/skills
+cp -R plugins/hermetiq/skills/hermetiq ~/.codex/skills/
+cp -R plugins/hermetiq/skills/on-prem-gke-install ~/.codex/skills/
 ```
 
 ### 4. Restart Codex
@@ -196,10 +201,28 @@ Show cache miss reasons by mnemonic for my failing builds
 | `references/infrastructure-tuning.md` | Buildbarn storage, worker, scheduler, and scaling guidance |
 | `evals/evals.json` | Skill behavior suite covering canonical selection, response-contract semantics, errors, disabled capabilities, and mutation safety |
 | `evals/canonical-mcp-catalog.json` | Release snapshot of canonical tools plus explicit prompt/resource/external-tool allowlists |
+| `on-prem-gke-install/SKILL.md` | GKE installation workflow for self-hosted Hermetiq and Buildbarn |
+| `on-prem-gke-install/references/known-gotchas.md` | Verified GKE, Gateway API, Auth0, Helm, and Buildbarn installation pitfalls |
 | `scripts/testdata/cloud-native-mcp-catalog.json.gz` | Exact compressed cloud-native server fixture used for deterministic CI parity checks |
 | `scripts/testdata/cloud-native-mcp-catalog.provenance.json` | Source revision and SHA-256 manifest verified by CI |
 | `scripts/validate-mcp-catalog.py` | Mechanical catalog-to-skill drift validator; pass `--server-catalog` to compare with the cloud-native fixture |
 | `scripts/sync-mcp-catalog.py` | Refresh both checked-in snapshots from an authoritative cloud-native catalog fixture |
+
+## Release versioning
+
+The GitHub release tag and the Claude marketplace plugin version identify
+different things:
+
+- A GitHub tag such as `v0.9.6-beta` identifies a repository snapshot and its
+  downloadable manual-install archives.
+- The SemVer in `plugins/hermetiq/.claude-plugin/plugin.json` and both version
+  fields in `.claude-plugin/marketplace.json` is Claude Code's update signal.
+
+Every release that changes `plugins/hermetiq/` must increase the plugin SemVer
+in all three fields before the GitHub tag is created. A new GitHub tag must not
+reuse a plugin version from an earlier tag. Pull requests enforce this rule with
+`scripts/check-plugin-version.py`; release reviewers should record both versions
+in release notes.
 
 ## Developer validation
 
@@ -209,6 +232,7 @@ catalog and the authoritative server fixture:
 ```bash
 python3 scripts/validate-mcp-catalog.py \
   --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json
+python3 scripts/check-plugin-version.py --base-ref origin/main
 python3 scripts/validate-bazel-guidance.py
 python3 -m unittest scripts/test_validate_mcp_catalog.py \
   scripts/test_run_mcp_evals.py scripts/test_validate_bazel_guidance.py -v

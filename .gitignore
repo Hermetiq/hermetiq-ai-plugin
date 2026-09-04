@@ -1,3 +1,6 @@
 .DS_Store
 .idea/
-plugins/hermetiq/skills/hermetiq.zip
+plugins/hermetiq/skills/*.zip
+__pycache__/
+*.py[cod]
+/tmp/
