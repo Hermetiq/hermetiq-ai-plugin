@@ -152,6 +152,24 @@ class PluginVersionCheckTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("must be greater than", completed.stderr)
 
+    def test_rejects_version_reused_on_diverged_current_base(self) -> None:
+        self.git("switch", "-c", "candidate")
+        self.skill.write_text("candidate guidance\n", encoding="utf-8")
+        self.write_versions("1.3.0")
+        self.commit("candidate plugin update")
+        self.git("switch", "main")
+        self.write_versions("1.3.0")
+        self.commit("independent base version bump")
+        self.git("switch", "candidate")
+
+        completed = self.check("main")
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            "plugin version 1.3.0 must be greater than baseline 1.3.0",
+            completed.stderr,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

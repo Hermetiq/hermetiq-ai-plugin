@@ -135,7 +135,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--base-ref",
-        help="Git ref used as the pull request base; omit for consistency-only validation",
+        help=(
+            "current pull request base ref; changed files use its merge-base with "
+            "HEAD, while version precedence compares directly with this ref"
+        ),
     )
     arguments = parser.parse_args()
 
@@ -146,6 +149,7 @@ def main() -> int:
             return 0
 
         merge_base = git("merge-base", arguments.base_ref, "HEAD").strip()
+        base_commit = git("rev-parse", f"{arguments.base_ref}^{{commit}}").strip()
         changed_files = set(git("diff", "--name-only", merge_base).splitlines())
         plugin_changed = any(path.startswith("plugins/hermetiq/") for path in changed_files)
         if not plugin_changed:
@@ -159,12 +163,12 @@ def main() -> int:
                 f"missing: {', '.join(sorted(missing))}"
             )
 
-        base_plugin_version = version_at(merge_base, PLUGIN_MANIFEST, ("version",))
+        base_plugin_version = version_at(base_commit, PLUGIN_MANIFEST, ("version",))
         base_marketplace_version = version_at(
-            merge_base, MARKETPLACE_MANIFEST, ("plugin:hermetiq", "version")
+            base_commit, MARKETPLACE_MANIFEST, ("plugin:hermetiq", "version")
         )
         base_metadata_version = version_at(
-            merge_base, MARKETPLACE_MANIFEST, ("metadata", "version")
+            base_commit, MARKETPLACE_MANIFEST, ("metadata", "version")
         )
         if len(
             {base_plugin_version, base_metadata_version, base_marketplace_version}

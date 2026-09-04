@@ -54,6 +54,18 @@ for skill in "${SUPPORTED_SKILLS[@]}"; do
     echo "error: skill source not found at $SKILLS_ROOT/$skill" >&2
     exit 1
   fi
+  skill_path="plugins/hermetiq/skills/$skill"
+  if ! git -C "$REPO_ROOT" cat-file -e "HEAD:$skill_path"; then
+    echo "error: skill is not tracked at HEAD: $skill_path" >&2
+    exit 1
+  fi
+  tracked_symlinks=$(git -C "$REPO_ROOT" ls-tree -r HEAD -- "$skill_path" \
+    | awk '$1 == "120000" { print $4 }')
+  if [[ -n "$tracked_symlinks" ]]; then
+    echo "error: release skills must not contain tracked symlinks:" >&2
+    echo "$tracked_symlinks" >&2
+    exit 1
+  fi
 done
 
 # Refuse symlinked deletion roots, then verify the normalized stage path is the
@@ -82,7 +94,12 @@ rm -rf -- "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
 for skill in "${SUPPORTED_SKILLS[@]}"; do
-  cp -R "$SKILLS_ROOT/$skill" "$STAGE_DIR/"
+  skill_path="plugins/hermetiq/skills/$skill"
+  # Archive from HEAD so untracked files and symlinks cannot enter a release.
+  # Three stripped components turn plugins/hermetiq/skills/<skill> into
+  # the required top-level <skill>/ archive directory.
+  git -C "$REPO_ROOT" archive --format=tar HEAD -- "$skill_path" \
+    | tar -x -C "$STAGE_DIR" --strip-components=3
   if [[ -d "$STAGE_DIR/$skill/evals" ]]; then
     rm -rf -- "$STAGE_DIR/$skill/evals"
   fi
