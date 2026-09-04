@@ -19,12 +19,12 @@ A [Hermetiq](https://dashboard.hermetiq.io) account with at least one project re
 
 ## Install in Claude Code
 
-```bash
-# Add the Hermetiq marketplace
-/plugin marketplace add Hermetiq/hermetiq-ai-plugin
+Paste these slash commands inside Claude Code:
 
-# Install the plugin
+```text
+/plugin marketplace add Hermetiq/hermetiq-ai-plugin
 /plugin install hermetiq@hermetiq
+/reload-plugins
 ```
 
 > The plugin marketplace is a Claude Code (CLI) feature, not Claude Desktop.
@@ -60,12 +60,13 @@ To configure the MCP server without the plugin, add this to your Claude Code MCP
 
 ## Usage
 
-Claude activates the skill automatically when you ask about build performance. You can also invoke it directly:
+Claude activates the skill automatically when you ask about build performance.
+For a marketplace plugin install, invoke the skill with its plugin namespace:
 
 ```
-/hermetiq analyze my latest build
-/hermetiq why is my cache hit rate dropping?
-/hermetiq compare this week's builds to last week
+/hermetiq:hermetiq analyze my latest build
+/hermetiq:hermetiq why is my cache hit rate dropping?
+/hermetiq:hermetiq compare this week's builds to last week
 ```
 
 Or ask naturally:
@@ -131,6 +132,9 @@ Then in Claude Desktop:
 1. Go to **Customize > Skills**
 2. Click **+** > **Upload a skill**
 3. Select `hermetiq.zip`
+
+This standalone uploaded skill is invoked as `/hermetiq`; the
+`/hermetiq:hermetiq` namespace above applies to the marketplace plugin install.
 
 ### 3. Enable code execution
 
