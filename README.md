@@ -192,7 +192,10 @@ Show cache miss reasons by mnemonic for my failing builds
 | `references/infrastructure-tuning.md` | Buildbarn storage, worker, scheduler, and scaling guidance |
 | `evals/evals.json` | Skill behavior suite covering canonical selection, response-contract semantics, errors, disabled capabilities, and mutation safety |
 | `evals/canonical-mcp-catalog.json` | Release snapshot of canonical tools plus explicit prompt/resource/external-tool allowlists |
+| `scripts/testdata/cloud-native-mcp-catalog.json.gz` | Exact compressed cloud-native server fixture used for deterministic CI parity checks |
+| `scripts/testdata/cloud-native-mcp-catalog.provenance.json` | Source revision and SHA-256 manifest verified by CI |
 | `scripts/validate-mcp-catalog.py` | Mechanical catalog-to-skill drift validator; pass `--server-catalog` to compare with the cloud-native fixture |
+| `scripts/sync-mcp-catalog.py` | Refresh both checked-in snapshots from an authoritative cloud-native catalog fixture |
 
 ## Developer validation
 
@@ -206,6 +209,33 @@ python3 scripts/validate-bazel-guidance.py
 python3 -m unittest scripts/test_validate_mcp_catalog.py \
   scripts/test_run_mcp_evals.py scripts/test_validate_bazel_guidance.py -v
 ```
+
+CI validates every distributable text file under `plugins/hermetiq/skills/**`
+and eval arguments against an exact compressed snapshot of
+`Hermetiq/cloud-native`'s private
+`bep-nats/mcpv2/testdata/catalog/current.json`. The compact plugin catalog's
+`source`, `sourceRevision`, `server`, and `serverVersion` fields record the
+provenance. Because this public repository's GitHub token cannot read the
+private source repository, refresh and verify both snapshots locally from the
+latest `cloud-native` `origin/main` before releasing:
+
+```bash
+git -C ../cloud-native fetch origin main
+git -C ../cloud-native show \
+  origin/main:bep-nats/mcpv2/testdata/catalog/current.json \
+  > /tmp/hermetiq-mcp-catalog.json
+python3 scripts/sync-mcp-catalog.py \
+  --server-catalog /tmp/hermetiq-mcp-catalog.json \
+  --source-revision "$(git -C ../cloud-native rev-parse origin/main)"
+python3 scripts/validate-mcp-catalog.py \
+  --server-catalog /tmp/hermetiq-mcp-catalog.json \
+  --server-provenance scripts/testdata/cloud-native-mcp-catalog.provenance.json
+```
+
+CI verifies the uncompressed fixture checksum and matches its source and
+revision to the compact catalog. It cannot independently query whether that
+recorded revision is still the tip of private `cloud-native`; the authenticated
+refresh command above is therefore a required release step.
 
 Run the real Claude/official-MCP canary suite with the API key and fixture IDs in
 the environment. In addition to tool selection, the suite requires supported

@@ -1,0 +1,35 @@
+name: Validate plugin
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-catalog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Expand the synchronized cloud-native fixture
+        run: >-
+          gzip --decompress --stdout
+          scripts/testdata/cloud-native-mcp-catalog.json.gz
+          > /tmp/cloud-native-mcp-catalog.json
+      - name: Validate every packaged skill and server catalog parity
+        run: >-
+          python3 scripts/validate-mcp-catalog.py
+          --server-catalog /tmp/cloud-native-mcp-catalog.json
+          --server-provenance scripts/testdata/cloud-native-mcp-catalog.provenance.json
+      - name: Run validator and eval-runner regression tests
+        run: >-
+          python3 -m unittest
+          scripts/test_validate_mcp_catalog.py
+          scripts/test_run_mcp_evals.py
+          -v
