@@ -359,6 +359,12 @@ mnemonics, phases, or flags.
 - Do not recommend a flag that the user already set. The insight rule layer
   suppresses those, and `get_invocation(includeCommandLine=true)` can verify the
   command line when needed.
+- Before giving concrete `.bazelrc` guidance, read
+  `data.invocation.buildToolVersion` from that complete invocation result and
+  apply the Bazel 5–9 compatibility matrix in `references/bazel-optimization.md`.
+  If the version is absent, unparseable, older than 5, or newer than 9, do not
+  emit a version-sensitive flag; ask for the Bazel version or have the user
+  verify the candidate with `bazel help build --long`.
 
 `find_actions` reads the Bazel-reported action stream, which in practice records
 only failures, so `result="success"` legitimately returns 0 rows on a build that
@@ -815,6 +821,8 @@ code bugs, flakes, or resource exhaustion.
    `PLATFORM_SUFFIX_CHANGED`, and `INPUT_CHANGED` miss reasons.
 5. Load `references/build-configuration.md` and `references/bazel-optimization.md`
    when giving concrete `.bazelrc` or BUILD-file guidance.
+6. Read `data.invocation.buildToolVersion` and apply the supported-version matrix
+   before naming a flag. Do not assume the newest spelling for an unknown version.
 
 ### Storage Configuration Audit
 

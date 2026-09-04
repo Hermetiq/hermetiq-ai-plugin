@@ -76,7 +76,10 @@ build:hermetiq --remote_timeout=1800s
 build:hermetiq --bes_timeout=600s
 ```
 
-`--remote_timeout` defaults to **exactly 60 seconds** in Bazel. Any single
+For Bazel 5–9, the range covered by the Hermetiq flag-guidance matrix,
+`--remote_timeout` defaults to **exactly 60 seconds**. When invocation telemetry
+is available, confirm the version from `data.invocation.buildToolVersion` before
+emitting a `.bazelrc` line. Any single
 `ByteStream.Write` (one blob upload — a static library, a fat jar, a
 toolchain-bootstrap artifact) that takes longer than that to transfer gets
 cancelled by the *client*, not the server. On a large enough project
