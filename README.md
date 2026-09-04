@@ -190,7 +190,7 @@ Show cache miss reasons by mnemonic for my failing builds
 | `references/build-configuration.md` | Configuration drift, hermeticity, stamping, toolchain, and flag audit guidance |
 | `references/bazel-optimization.md` | Common Bazel flags and build graph anti-patterns |
 | `references/infrastructure-tuning.md` | Buildbarn storage, worker, scheduler, and scaling guidance |
-| `evals/evals.json` | Skill behavior suite covering canonical selection, errors, disabled capabilities, and mutation safety |
+| `evals/evals.json` | Skill behavior suite covering canonical selection, response-contract semantics, errors, disabled capabilities, and mutation safety |
 | `evals/canonical-mcp-catalog.json` | Release snapshot of canonical tools plus explicit prompt/resource/external-tool allowlists |
 | `scripts/validate-mcp-catalog.py` | Mechanical catalog-to-skill drift validator; pass `--server-catalog` to compare with the cloud-native fixture |
 
@@ -202,12 +202,14 @@ catalog and the authoritative server fixture:
 ```bash
 python3 scripts/validate-mcp-catalog.py \
   --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json
-python3 -m unittest scripts/test_validate_mcp_catalog.py -v
+python3 -m unittest scripts/test_validate_mcp_catalog.py scripts/test_run_mcp_evals.py -v
 ```
 
 Run the real Claude/official-MCP canary suite with the API key and fixture IDs in
-the environment. The runner writes one raw/scored JSON artifact per case plus an
-aggregate `run.json`; it never writes the API key:
+the environment. In addition to tool selection, the suite requires supported
+response claims and rejects forbidden legacy fields or over-specific diagnoses.
+The runner writes one raw/scored JSON artifact per case plus an aggregate
+`run.json`; it never writes the API key:
 
 ```bash
 ANTHROPIC_API_KEY=... \

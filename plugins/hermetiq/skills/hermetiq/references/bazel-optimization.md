@@ -19,6 +19,8 @@ Remote execution tuning:
 - `build --remote_timeout=3600` — Prevents timeouts on long-running actions.
 - `build --remote_retries=5` — Retries transient failures.
 - `build --jobs=<N>` — Controls parallelism. Compare with get_build_parallelism before changing.
+  Compare it only with the executing remote-action concurrency series, never with worker
+  replicas, slots, or the scheduler executing gauge.
 - `build --experimental_remote_cache_compression` — Compresses storage transfers and reduces
   input fetch/output upload time when transfer size is significant.
 - `build --remote_download_minimal` — Downloads only outputs needed locally.
@@ -48,7 +50,12 @@ When you see these in Hermetiq data, recommend specific fixes:
 
 2. **Deep dependency chain**: Long sequential chains of actions.
    - Signal: Low parallelism in get_build_parallelism despite many total actions, or critical path
-     trends dominated by the same target family.
+     trends dominated by the same target family. get_build_parallelism counts only
+     remote-executed actions and begins at the first remote action, so an empty series means no
+     remote execution was observed rather than a serial graph. A short nonempty series proves
+     remote actions ran but does not by itself diagnose the graph — confirm
+     `data.invocation.remoteExecutionEnabled` and `get_project.data.completedActionLogEnabled`
+     before reading it as a parallelism signal.
    - Fix: Flatten the dependency graph and use `implementation_deps` to reduce transitive
      dependencies where supported.
 

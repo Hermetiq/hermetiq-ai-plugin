@@ -10,7 +10,15 @@
   invocations with `list_invocations`, then call
   `get_invocation(invocationId=..., includeCommandLine=true)` for each.
 - Build history tools accept bounded public filters directly: `lookback`, `repository`,
-  `branch`, `command`, and `status`. Do not construct protobuf filter or aggregation objects.
+  `branch`, `command`, and `status`. The `status` vocabulary is `success` (alias `ok`),
+  `failed` (aliases `error`, `failure`), `remote_error`, `in_progress`, and `interrupted`.
+  `remote_error` is a strict subset of `failed` — numeric Bazel exit code 34 — not an alias
+  for it, and no value selects an `unknown` invocation. It denotes a general remote-system
+  outcome, not specifically a missing compatible worker. That diagnosis also requires zero
+  remote executions, matching failure-message evidence, and the requested platform.
+  Aggregated trend tools take the same values in a `statuses` array, and
+  `list_filter_values(field="status")` returns this static vocabulary. Do not construct
+  protobuf filter or aggregation objects.
 - `get_invocation_insights` is invocation-scoped. It exposes the current typed recommendation
   schema for the same profile-derived action-plan surface that `get_invocation` also surfaces
   under `data.profile.insights`, without loading the full invocation payload.
@@ -21,6 +29,13 @@
   high-cardinality pattern type-ahead; do not synthesize an internal lookup tool.
 - Prefer stable aggregation tools (`analyze_remote_execution`, `get_remote_action_trends`) for
   transfer and timing bottlenecks before drilling into individual `find_remote_actions` records.
+- `find_actions` reads the Bazel-reported action stream, which in practice records only
+  failures, so `result="success"` legitimately returns 0 rows on a build that executed
+  thousands of actions. Use `find_remote_actions` for successful remote executions. `label`
+  is a case-insensitive substring match while `mnemonic` is exact and case-sensitive.
+- `list_targets` describes the build phase only (Bazel's `TargetComplete` event): a target
+  that built but whose test run failed is `success` with no `failureDetail` and is excluded
+  by `result="failed"`. Use `find_actions` or `get_test_results` for test outcomes.
 - When prompt orchestration is unavailable in a client, use direct tool-call equivalents from
   the skill playbooks.
 
@@ -46,6 +61,10 @@ workflow needs a concrete attempt, per-action data, logs, command lines, tests, 
 remote execution analytics, or parallelism data.
 
 Key fields for optimization analysis:
+- `status` — always present: `success`, `failed`, `interrupted`, `in_progress`, or `unknown`
+  (the invocation ended with no recorded exit code). This is the field to read for outcome.
+- `exitCode` / `exitCodeName` — `exitCode` is **absent**, not 0, when the backend recorded
+  none; `status: "unknown"` is exactly that case. No status filter can select `unknown`.
 - `invocationId` — one attempt
 - `buildId` — logical build ID shared by related attempts when present
 - `remoteCacheEnabled` / `remoteExecutionEnabled` — Whether remote cache and remote execution were enabled
@@ -58,6 +77,11 @@ Key fields for optimization analysis:
   profile-derived insights
 - `command` — Which Bazel command (build, test, run, cquery, aquery)
 - `platformName` / `cpu` — Target platform (affects cache partitioning)
+
+Key invocation-level tools:
+- `get_build_logs` — redacted stdout/stderr for one completed invocation. Each stream is
+  capped at 4096 bytes with the head **and** the tail kept around a marked omission; read the
+  tail, because Bazel reports the failure at the end of the stream.
 
 ### CacheEvent
 One record per Action Cache lookup intercepted by Hermetiq's gRPC cache proxy.
@@ -76,8 +100,17 @@ Key fields:
   - `CACHE_EVICTED` — Entry existed but was evicted from storage
   - `PLATFORM_SUFFIX_CHANGED` — Platform configuration drift
   - `INSTANCE_MISMATCH` — Different remote cache instance
+  - `INSUFFICIENT_TRACKED_HISTORY` — The tracked lookback did not reach far enough back to
+    see a prior entry for this action
 - `inputRootDigest` / `commandDigest` / `environmentHash` / `platformHash` — Metadata
   used to determine miss reasons by comparing against previous hits
+
+`summarize_cache_events.data.aggregations.byMissReason` can additionally report `UNKNOWN`
+(enrichment ran and could not classify), `NOT_ENRICHED` (still queued for CAS enrichment),
+and `ENRICHMENT_UNAVAILABLE` (enrichment gave up because the CAS metadata never arrived).
+Those are pipeline states rather than classifications and are not accepted as a `reason`
+filter; `reason: "unknown"` is rejected outright because the backend reads it as "no filter".
+A cache HIT row carries no `missReason` at all.
 
 ### RemoteAction
 One record per action executed on a Buildbarn worker. Provides granular phase timing.
@@ -105,7 +138,9 @@ Key fields:
 - `actionCacheHits` / `actionCacheMisses` — Bazel's own local Action Cache stats
 - `analysisDuration` / `executionDuration` / `totalDuration` — Build phase timing
 - `cpuDuration` — CPU time
-- `bytesSent` / `bytesReceived` — Network I/O during the build
+- `bytesSent` / `bytesReceived` — whole-host network counters for the machine that ran the
+  build, **not** Bazel remote-cache traffic. Never quote them as Content Addressable Storage
+  or Action Cache transfer volume, and never size a transfer optimization from them.
 - Content Addressable Storage operation metrics: `casOperations`, `casOperationsAvgMs`,
   `casRemoteDownload*`, `casRemoteUpload*`
 
@@ -117,31 +152,30 @@ Key fields:
 - `executed` / `created` — How many ran versus were in the graph
 - `firstStartedMs` / `lastEndedMs` — Temporal span of this mnemonic's executions
 
-### InvocationProfileMetrics and Profile Insights
-Parsed Bazel JSON trace profile summary for one invocation. It lets agents explain where time
-went without reconstructing a profile from raw trace events.
+`get_invocation`'s `actions.byMnemonic` is Bazel's own `action_data` for its heaviest
+mnemonics only: it does **not** sum to `actions.total`, its `created` counter is **not**
+comparable with `metrics.actionsCreated`, and `actionsTruncated` is set whenever those rows
+account for fewer actions than `actions.total`. Never present a byMnemonic total as the
+invocation's action count.
 
-Key fields:
-- `buildWallTimeMicros`, `analysisPhaseMicros`, `executionPhaseMicros` — wall-time
-  anatomy for the invocation.
-- Remote phase totals: `remote_queue_micros`, `remote_fetch_micros`,
-  `remote_process_micros`, `remote_upload_micros`, `remote_output_download_micros`, and
-  `remote_cache_check_micros`.
-- Merkle-tree and `findMissingDigestsMicros` timing — local/client-side work before remote cache
-  or execution requests.
-- `critical_path_micros`, `critical_path_component_count`, `critical_path_execution_ratio`,
-  and `critical_path_queue_micros` — critical-path shape and whether the slow path is queue or
-  execution heavy.
-- `bottleneckKind` / `bottleneckRatio` — server-classified dominant bottleneck and share.
-- `effectiveParallelism` — action work divided by build wall time; use with
-  `get_build_parallelism` to distinguish low graph parallelism from worker capacity limits.
-- `gc_count`, `gc_total_micros`, `gc_max_micros`, plus `resource_metrics` — client resource
-  pressure signals.
-- `timeline_segments`, `timeline_events`, `phase_metrics`, `remote_phase_metrics`,
-  `mnemonic_metrics`, and `hotspot_metrics` — profile-derived timeline and hotspot detail.
-- `insights` — older embedded `ProfileInsight` records for single-invocation recommendations.
-  Prefer `get_invocation_insights` for the current typed insight schema when only the action plan
-  is needed.
+### Invocation profile and profile insights
+`get_invocation` exposes a compact, model-facing Bazel JSON trace profile under
+`data.profile`. It lets agents explain the broad time split without reconstructing raw trace
+events.
+
+Exact fields:
+- `bazelVersion`
+- `wallTimeSeconds`, `analysisSeconds`, `executionSeconds`
+- `remoteExecutionSeconds`, `remoteQueueSeconds`, `criticalPathSeconds`, `gcSeconds`
+- `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
+- `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
+  `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
+  `caveats`
+
+Raw microsecond phase fields, fetch/upload/output-download subphases, GC counts, resource
+arrays, timeline segments, and hotspot arrays are not exposed in this payload. Use the trend or
+dedicated drill-down tools when those surfaces are needed. Prefer `get_invocation_insights` for
+the current typed insight schema when only the action plan is needed.
 
 `get_invocation_insights` returns typed records under `data.insights`:
 - `insightId` — stable key for dedupe and per-rule links.
@@ -195,9 +229,14 @@ Profile bottleneck glossary:
 
 ### Build History (logical build grouping)
 - `list_builds` — grouped build rows with primary invocation, attempt counts, status rollups,
-  cache/execution totals, and pagination.
-- `summarize_build_history` — total logical builds plus success, failure, interrupted, and
-  in-progress counts over the selected build universe.
+  cache/execution totals, and pagination. Each `BuildSummary` row (also used by build-detail
+  surfaces) exposes `invocationCount`, `successCount`, `failureCount`, `interruptedCount`,
+  `inProgressCount`, and `unknownCount`; those five outcome counters account for every attempt.
+- `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` with exactly
+  `totalBuildCount`, `successCount`, `failureCount`, `interruptedCount`, and
+  `inProgressCount`. It has neither `unknownCount` nor `invocationCount`, so do not apply the
+  per-build five-counter invariant to this response. Its outcome counters can sum below
+  `totalBuildCount` when a logical build has only unknown attempts.
 - `get_build_timeseries` — build counts bucketed by time with build-level status rollups.
 - These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
@@ -211,10 +250,20 @@ Profile bottleneck glossary:
 - `data.aggregations.byMissReason` — Count per reason category
 
 ### CacheTrends (cross-build, time-windowed)
+Every `hitRate` and `byteHitRate` in this payload — `summary`, `buckets`, `byMnemonic`,
+`topMissTargets`, and the heatmap — is a fraction from 0 to 1, matching
+`summarize_cache_events` and `group_cache_events`. `data.digestReuse.reuseRatePct`
+remains a percentage from 0 to 100 because the unit is explicit in its field name.
 - `data.summary` — Total lookups, hit rate, average latency over the period
+- `data.summary.hitRateChange` — change in the hit-rate fraction against the immediately
+  preceding window of the same length (`0.05` means +5 percentage points); absent when either
+  window recorded no lookups
 - `data.buckets` — Per-day hit rates and lookup volumes
 - `data.buckets[].missReasons` — How miss reasons distribute over time
-- `data.mnemonicDayHeatmap` — Mnemonic × day hit rate grid
+- `data.mnemonicDayHeatmap` — Mnemonic × day hit rate grid. **Omitted unless
+  `includeMnemonicDayHeatmap=true`**: it is the largest part of this payload and is capped at
+  200 cells. When omitted the response says so in `data.note` and names it in
+  `truncatedFields` — its absence is not "no per-mnemonic data".
 - `data.topMissTargets` — Targets with most misses over the period
 
 ### RemoteExecutionAnalytics (per-invocation)
@@ -638,8 +687,11 @@ operator-supplied fact and label it as such.
 Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
 message limits, worker concurrency) drift per deployment and per release — do not quote
 remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (a file index and secret scan only,
-not geometry) without a store filter, followed by `get_buildbarn_config` (raw jsonnet).
-Identify CAS, AC, ISCC, and FSAC from configuration content rather than filenames, then correlate with
+not geometry) without a store filter, followed by `get_buildbarn_config` (raw jsonnet). Both return only
+ConfigMaps an installed Buildbarn workload mounts or reads unless you pass `includeUnmounted=true`;
+check `data.scope`, `data.scopeReason`, and each entry's `mounted` field. Take the CAS/AC/ISCC/FSAC
+mapping from `data.configurations[].stores` and the `data.configurations[].fields` behind it rather
+than from filenames, then correlate with
 `get_storage_health` / `get_worker_fleet_health` / `get_scheduler_health` before recommending
 changes.
 

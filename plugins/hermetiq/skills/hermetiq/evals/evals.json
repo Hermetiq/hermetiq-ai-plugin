@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "skillName": "hermetiq",
-  "catalogVersion": "0.17.0",
+  "catalogVersion": "0.18.0",
   "baseline": {
     "source": "cloud-native/bep-nats/mcpv2/evals/*.json before the coordinated skill migration",
     "cases": 23,
@@ -141,6 +141,41 @@
       "expectedBehavior": ["reports the cost capability as unavailable", "does not call an unrelated tool"],
       "evidence": ["states that no billing conclusion is supported"],
       "expectedFinalPatterns": ["unavailable|not available|absent|does not provide|do not .*provide|no .*cost tools?|cannot fulfill", "cost|billing|spending"]
+    },
+    {
+      "id": "remote-error-evidence-boundary",
+      "category": "remote_error_contract",
+      "prompt": "Use the Hermetiq skill. Inspect known invocation ${FAILURE_INVOCATION_ID} with get_invocation only. Explain what a REMOTE_ERROR outcome proves, whether it alone proves that no compatible worker advertised the requested platform, and name every additional observation required for that diagnosis.",
+      "expectedMcpSequence": ["get_invocation"],
+      "expectedFirstCall": {"tool": "get_invocation", "arguments": {"invocationId": "${FAILURE_INVOCATION_ID}"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["treats REMOTE_ERROR as a general remote-system outcome", "does not infer a missing compatible worker from status alone", "requires zero remote executions, matching failure-message evidence, and the requested platform"],
+      "evidence": ["cites the invocation outcome", "states the missing-worker evidence boundary"],
+      "expectedFinalPatterns": ["remote[_ ]?error|exit code 34", "(?:does not|doesn't|cannot).*prove|not (?:by itself|alone|enough)", "zero remote executions?", "failure message", "requested platform"],
+      "forbiddenFinalPatterns": ["remote[_ ]?error\\s+(?:exactly|always)\\s+(?:means|proves|identifies)[^.]{0,80}no (?:compatible )?worker"]
+    },
+    {
+      "id": "invocation-profile-response-contract",
+      "category": "response_contract",
+      "prompt": "Use the Hermetiq skill. Call get_invocation for ${INVOCATION_ID} with profileMode light. Name the exact compact fields available under data.profile, and explicitly distinguish them from raw profile fields that are not in this response. Do not call another tool.",
+      "expectedMcpSequence": ["get_invocation"],
+      "expectedFirstCall": {"tool": "get_invocation", "arguments": {"invocationId": "${INVOCATION_ID}", "profileMode": "light"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["uses the compact camelCase seconds-based profile contract", "does not claim that raw microsecond, timeline, resource, or hotspot fields are returned"],
+      "evidence": ["names the returned compact timing fields", "states the boundary around unavailable raw detail"],
+      "expectedFinalPatterns": ["wallTimeSeconds", "analysisSeconds", "executionSeconds", "remoteExecutionSeconds", "remoteQueueSeconds", "criticalPathSeconds", "gcSeconds", "bottleneckKind", "effectiveParallelism", "not (?:exposed|available|returned)|does not (?:expose|return)"],
+      "forbiddenFinalPatterns": ["(?:data\\.profile|response)[^.]{0,80}(?:exposes|returns|includes)[^.]{0,120}(?:buildWallTimeMicros|remote_output_download_micros|critical_path_micros|gc_count|timeline_segments)", "(?:buildWallTimeMicros|remote_output_download_micros|critical_path_micros|gc_count|timeline_segments)[^.]{0,50}(?:is|are) (?:exposed|available|returned|included)"]
+    },
+    {
+      "id": "build-history-response-contract",
+      "category": "response_contract",
+      "prompt": "Use the Hermetiq skill. Call summarize_build_history for the last 7 days. Report the exact aggregate counter names in that response, state whether unknownCount or invocationCount is present, and explain why the per-BuildSummary five-counter invariant must not be applied here. Do not call another tool.",
+      "expectedMcpSequence": ["summarize_build_history"],
+      "expectedFirstCall": {"tool": "summarize_build_history", "arguments": {"lookback": "7d"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["names only the five aggregate history fields", "does not attribute unknownCount or invocationCount to BuildHistorySummaryResponse", "keeps the per-build invariant scoped to BuildSummary"],
+      "evidence": ["cites the returned aggregate counters", "states the unknown-outcome limitation"],
+      "expectedFinalPatterns": ["totalBuildCount", "successCount", "failureCount", "interruptedCount", "inProgressCount", "(?:unknownCount|unknown count).*(?:not|isn't|is not|absent)|(?:not|no|without).*(?:unknownCount|unknown count)", "(?:invocationCount|invocation count).*(?:not|isn't|is not|absent)|(?:not|no|without).*(?:invocationCount|invocation count)"]
     },
     {
       "id": "invalid-id-recovery",

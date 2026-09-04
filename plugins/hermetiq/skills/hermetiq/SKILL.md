@@ -102,8 +102,17 @@ Two capability boundaries are hard rules:
   from the bounded opaque-build flow.
 
 `analyze_buildbarn_storage` discovers which storage-related Buildbarn
-configuration files exist in the authorized namespace and flags secret-bearing
-keys. Per its own tool description it does **not** validate storage geometry or
+configuration files an installed Buildbarn workload actually mounts or reads in
+the authorized namespace, and flags secret-bearing keys. It no longer returns
+every ConfigMap in the namespace: orphaned generations such as kustomize
+hash-suffixed copies are excluded unless you pass `includeUnmounted=true`. Read
+`data.scope` (`mounted_only` or `all_config_maps`), `data.scopeReason`, and each
+entry's `mounted` field (`mounted`, `unmounted`, or `unknown`) before calling any
+file the deployed configuration; `get_buildbarn_config` is scoped the same way
+and takes the same `includeUnmounted`. The `store` filter matches semantic
+configuration fields, not filenames, and `data.configurations[].stores` with
+`data.configurations[].fields` carries the content-derived CAS/AC/ISCC/FSAC
+mapping. Per its own tool description it does **not** validate storage geometry or
 configuration correctness, and `data.findings` is frequently empty — a
 `data.status` of `files_discovered` with `data.findings: []` means "these files
 exist", not "this storage is healthy". Never report empty findings as a clean
@@ -112,7 +121,12 @@ storage model.
 When schema tools are present, prefer `get_buildbarn_config_field` for a known
 path, `search_buildbarn_config_schema` for discovery,
 `describe_buildbarn_config_type` for one type, and
-`list_buildbarn_config_roots` for service roots.
+`list_buildbarn_config_roots` for service roots. A field's reported type is the
+message name without its package, so distinct messages collapse to one label and
+the type string is not itself a valid `fqn` — resolve one from
+`nestedMessage.fqn` at `depth` 1 or higher, or with
+`search_buildbarn_config_schema`, before calling
+`describe_buildbarn_config_type` on it.
 
 Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `invocation_insights`, `investigate_failure`, `diagnose_exec_environment`,
@@ -121,7 +135,16 @@ Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `profile_trends`, `rbe_trends`, `rbe_optimization`, `compare_periods`,
 `infra_health`, `analyze_storage_config`, and
 `setup_hermetiq_bazel`. Use a prompt when it matches the user's intent; otherwise
-call the tools directly.
+call the tools directly. Their arguments are: `invocation_id` for
+`analyze_invocation`, `debug_cache_misses`, `diagnose_exec_environment`,
+`infra_health`, `investigate_failure`, `invocation_insights`, and
+`test_failures`; `lookback` plus `repository`, `command`, `pattern`, `branch`,
+and `user` for `cache_trends`, `compare_periods`, `find_slow_builds`,
+`project_health`, `rbe_optimization`, `rbe_trends`, and `weekly_trends_report`
+(`profile_trends` adds `status`); `store` and `time_range` for
+`analyze_storage_config`; and `directory` for `setup_hermetiq_bazel`. The
+project-window prompts take `lookback`, not `time_range`, and no prompt takes
+`project_id` or `platform_name`.
 
 Prompts are user-selected workflow templates, not tools. A client may expose
 them separately from its tool picker. Resource URIs are application-controlled
@@ -159,6 +182,30 @@ context and likewise are not tool calls.
   new choice from the user.
 - Prefer `list_builds` for user-facing history because it groups attempts by
   `buildId`. Use `list_invocations` when you need one attempt.
+- Read each invocation's `status`, never its `exitCode`. `status` is always
+  present and is `success`, `failed`, `interrupted`, `in_progress`, or
+  `unknown`; `unknown` means the invocation ended with no recorded exit code.
+  `exitCode` is absent, not 0, whenever the backend recorded none. No `status`
+  filter can select `unknown`, so a filtered count can add up to less than the
+  unfiltered total — say so rather than calling it a discrepancy.
+- Per-build `BuildSummary` objects returned by `list_builds`, `get_build`, and
+  `get_build_details` carry five counts that together account for
+  `invocationCount`: `successCount`, `failureCount`, `interruptedCount`,
+  `inProgressCount`, and `unknownCount`. Never present the first four as the
+  whole build. The aggregate `summarize_build_history` response is different:
+  it has `totalBuildCount` and the first four outcome counters, but no
+  `unknownCount` or `invocationCount`, so its counters can sum below the total.
+- The `status` filter vocabulary for `list_builds`, `list_invocations`,
+  `summarize_build_history`, `get_build_timeseries`,
+  `summarize_invocation_timeseries`, and `get_invocation_timeseries` is
+  `success` (alias `ok`), `failed` (aliases `error`, `failure`), `remote_error`,
+  `in_progress`, and `interrupted`. `remote_error` is a strict subset of
+  `failed` — numeric Bazel exit code 34 — not a synonym for it. It identifies
+  the general `REMOTE_ERROR` outcome population; it does not by itself prove
+  that no worker advertised the requested platform. That diagnosis additionally
+  requires zero remote executions, matching failure-message evidence, and the
+  requested platform. Aggregated trend tools take the same values in a
+  `statuses` array.
 - When the user gives an opaque ID from a URL or copied text, call
   `resolve_build_or_invocation`.
 - Use `buildId` with single-build tools: `get_build`, `get_build_details`,
@@ -174,6 +221,10 @@ context and likewise are not tool calls.
   `analyze_remote_execution`, `find_actions`, `get_action_execution`,
   `list_targets`, `get_test_results`, `get_build_parallelism`, and
   `get_invocation_insights`.
+- `list_targets` describes the build phase only (Bazel's `TargetComplete`
+  event). A target that built but whose test run failed is listed as `success`
+  with no `failureDetail` and is excluded by `result="failed"` — use
+  `find_actions` or `get_test_results` for test outcomes.
 - Use `get_invocation_insights(invocationId=...)` for the curated "what should I
   change?" list for one invocation. `get_invocation` also surfaces profile
   insights in its structured result; call the dedicated tool
@@ -193,14 +244,30 @@ context and likewise are not tool calls.
   an array of at most 20 values.
 - Use `limit`/`offset` only when listed. `list_builds` uses the opaque
   `data.nextCursor` returned by the server as the next `cursor`.
-- Field names are exact and case-sensitive. Common examples are
-  `includeCommandLine`, `includeActionSummary`, `includeMissAnalysis`,
-  `includeLogs`, `bucketSeconds`, and `forceRaw`.
+- Field names are exact and case-sensitive, and every schema rejects unknown
+  fields. Common examples are `includeCommandLine`, `includeActionSummary`,
+  `includeMissAnalysis` (`find_cache_events` only — `group_cache_events` rejects
+  it), `includeLogs`, `includeMnemonicDayHeatmap` (`get_cache_trends`),
+  `includeUnmounted` (`get_buildbarn_config`, `analyze_buildbarn_storage`),
+  `includeAllFields` (`list_buildbarn_events`, `get_buildbarn_pod_logs`),
+  `bucketSeconds`, and `forceRaw`.
 - Use `find_cache_events(includeMissAnalysis=true)` for actionable miss reasons.
-  Reason strings are `NEVER_CACHED`, `INPUT_CHANGED`, `COMMAND_CHANGED`,
-  `ENV_CHANGED`, `PLATFORM_CHANGED`, `CACHE_EVICTED`, `INSTANCE_MISMATCH`, and
-  `PLATFORM_SUFFIX_CHANGED`. Both cache tools return this bare form; do not add
-  the protobuf `MISS_REASON_` prefix.
+  `includeMissAnalysis` belongs to `find_cache_events` only —
+  `group_cache_events` does not accept the field and rejects it.
+  Filterable reason strings are `NEVER_CACHED`, `INPUT_CHANGED`,
+  `COMMAND_CHANGED`, `ENV_CHANGED`, `PLATFORM_CHANGED`, `CACHE_EVICTED`,
+  `INSTANCE_MISMATCH`, `PLATFORM_SUFFIX_CHANGED`, and
+  `INSUFFICIENT_TRACKED_HISTORY`. Both cache tools return this bare form; do not
+  add the protobuf `MISS_REASON_` prefix.
+  `summarize_cache_events.data.aggregations.byMissReason` can also report three
+  states that are not classifications and are not accepted as `reason`:
+  `UNKNOWN` (enrichment ran and could not classify), `NOT_ENRICHED` (still
+  queued for CAS enrichment), and `ENRICHMENT_UNAVAILABLE` (enrichment gave up
+  because the CAS metadata never arrived). A window dominated by any of them is
+  unclassified evidence, not a diagnosed cause.
+  `reason: "unknown"` is rejected by both tools, because the backend reads it as
+  "no filter" and would return every miss — omit `reason` instead.
+  A cache HIT row carries no `missReason` at all; its absence is not `UNKNOWN`.
 
 ## Intent to Tool Map
 
@@ -211,8 +278,9 @@ context and likewise are not tool calls.
 | Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` and `get_worker_scaling_timeline` when listed |
 | Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
 | Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")`, `get_action_execution` |
+| Build failure output / "what did Bazel actually print?" | `get_build_logs` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
-| Failed or flaky tests | `get_test_results(status="failed", includeLogs=true)` | `get_test_trends`, `get_test_timing`, `get_failed_action_trends`, `get_flaky_action_trends` |
+| Failed or flaky tests | `get_test_results(includeLogs=true)`, then read `data.summary` (`failedCount`, `flakyCount`, `timeoutCount`, `passedCount`) | one call per verdict — `get_test_results(status="failed")`, `="flaky"`, `="timeout"` — then `get_test_trends`, `get_test_timing`, `get_failed_action_trends`, `get_flaky_action_trends` |
 | Build trends | `summarize_build_history` or `summarize_project_trends` | `get_build_timeseries`, `get_cache_trends`, `get_profile_trends`, `get_remote_action_trends` |
 | Profile trends or "where did time go?" | `get_profile_trends(lookback="7d")` | `get_critical_path_trends`, `get_remote_action_trends`, `get_cache_trends`, infra tools only when profile metrics point there |
 | Time-period comparison | `summarize_project_trends` | `get_remote_action_trends`, `get_cache_trends`, `get_target_trends` |
@@ -221,7 +289,7 @@ context and likewise are not tool calls.
 | Cost reduction | `get_remote_action_trends(lookback="30d")` | `analyze_remote_execution`, `get_cost_summary` |
 | Remote action detail | `group_remote_actions` | `find_remote_actions`, `get_remote_action_command` |
 | Target trends | `get_target_trends` | `get_target_trend_detail`, `list_targets` |
-| Filter discovery | `list_filter_values` | Use a supported `field`; patterns are intentionally not exposed for high-cardinality lookup |
+| Filter discovery | `list_filter_values` | Supported `field` values are `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status`, `tag`, `user`; patterns are intentionally not exposed for high-cardinality lookup. `field="status"` is the exception — it returns the static status vocabulary rather than values observed in the window, so it carries no counts and no `effectiveWindow`, and every value it lists is accepted by `list_builds` and `list_invocations` |
 | Project activity | `get_project_activity` | `summarize_project_trends`, `summarize_build_history` |
 | Build configuration audit | `list_invocations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`, `find_cache_events` |
 | Storage configuration audit / sizing | `analyze_buildbarn_storage` (or `get_buildbarn_config` only if present) | `get_storage_health`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
@@ -280,7 +348,8 @@ mnemonics, phases, or flags.
 - Surface caveats. They are part of the server-side confidence model.
 - Validate the top insights before presenting them as findings. Use
   `affectedItems` to call the smallest corroborating tool: `find_actions` for
-  action/target pointers, `find_cache_events(includeMissAnalysis=true)` for cache
+  failed action/target pointers and `find_remote_actions` for successful remote
+  executions, `find_cache_events(includeMissAnalysis=true)` for cache
   pointers, `analyze_remote_execution` for remote phase timing, and
   `get_build_parallelism` for concurrency or critical-path claims.
 - The insight response is itself server-derived evidence. Do not expand into a
@@ -290,6 +359,17 @@ mnemonics, phases, or flags.
 - Do not recommend a flag that the user already set. The insight rule layer
   suppresses those, and `get_invocation(includeCommandLine=true)` can verify the
   command line when needed.
+
+`find_actions` reads the Bazel-reported action stream, which in practice records
+only failures, so `result="success"` legitimately returns 0 rows on a build that
+executed thousands of actions — that is not evidence the build ran nothing. Use
+`find_remote_actions` for successful remote executions. Only when an invocation
+has no Bazel-reported actions at all is the page served from remote executions.
+Its `label`/`labelOperator` filters are case-insensitive **substring** matches,
+so a package prefix selects every target beneath it, while `mnemonic` is exact
+and case-sensitive; `workerNode` and `strategyTerms` are honoured or rejected
+rather than ignored; and `offset` pages correctly past the first page. Pass each
+row's `id` (not `seqNum`) to `get_action_execution`.
 
 Use `get_profile_trends` for project or time-window questions about Bazel JSON
 trace profiles. Default to `lookback="7d"` unless the user asks otherwise.
@@ -324,12 +404,22 @@ or Bazel's local disk-cache counters. A zero-hit result explains why remote work
 had to execute, but a like-for-like cold-build comparison is still required to
 decide whether cache misses explain an unusual regression.
 
-| Hit rate | Assessment | Action |
+Every `hitRate` and `byteHitRate` in `get_cache_trends` — `summary`, `buckets`,
+`byMnemonic`, `topMissTargets`, and the heatmap — is a fraction from 0 to 1,
+matching the identically named fields in `summarize_cache_events` and
+`group_cache_events`. `get_cache_trends.data.summary.hitRateChange` is the
+change in that fraction against the immediately preceding window of the same
+length: `0.05` means an increase of 5 percentage points. It is absent when
+either window recorded no lookups. `data.digestReuse.reuseRatePct` deliberately
+remains a percentage from 0 to 100 because its field name explicitly carries
+the unit.
+
+| Hit-rate fraction | Assessment | Action |
 |----------|------------|--------|
-| >90% | Healthy | Monitor for regression |
-| 70-90% | Needs attention | Investigate worst mnemonics and targets |
-| 50-70% | Significant problem | Deep-dive miss reasons |
-| <50% | Critical | Check cache configuration, hermeticity, and storage |
+| >0.90 | Healthy | Monitor for regression |
+| 0.70-0.90 | Needs attention | Investigate worst mnemonics and targets |
+| 0.50-0.70 | Significant problem | Deep-dive miss reasons |
+| <0.50 | Critical | Check cache configuration, hermeticity, and storage |
 
 Miss reason guidance:
 
@@ -343,6 +433,8 @@ Miss reason guidance:
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
 | `CACHE_EVICTED` | Storage too small or retention too short | Read `eviction_age_min_shard` from `get_storage_health` and compare it to the longest build; size the disk and key-location map together |
 | `NEVER_CACHED` | First observed action | Usually expected for new code or targets |
+| `INSUFFICIENT_TRACKED_HISTORY` | The tracked lookback did not reach far enough back to see a prior entry | Widen the comparison window before treating the miss as new work |
+| `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Not classifications: the miss was never classified, is still queued for enrichment, or enrichment gave up | Report the window as unclassified and assign no cause. None of these is accepted as a `reason` filter |
 
 If `INPUT_CHANGED` dominates for one mnemonic or target, call
 `find_cache_events(includeMissAnalysis=true)` and inspect the input, command,
@@ -409,7 +501,12 @@ the command line is missing/truncated, do not invent a numeric cap. Compare that
 numeric ceiling only with `get_build_parallelism`'s executing remote-action
 concurrency. The scheduler `executing` gauge is an independently aggregated
 scheduler metric, not a second concurrency count to compare with `--jobs`, and
-neither measurement is a count of worker slots or replicas.
+neither measurement is a count of worker slots or replicas. The series begins at
+the first remote action rather than at the invocation start, so the gap before
+the first bucket is analysis and local work, not idle capacity. An invocation
+with no remote actions returns an **empty** series: that means no remote
+execution was observed, not zero concurrency, and it is never evidence of a
+capacity or graph limit — do not run the matrix below on an empty series.
 
 | Observed evidence | Interpretation |
 |-------------------|----------------|
@@ -425,7 +522,12 @@ time-aligned desired/available/ready replica or scale-event timeline showing
 capacity arriving after queue growth. Without it, capacity arrival and slow
 autoscaling remain hypotheses. When `get_worker_scaling_timeline` is listed,
 call it with the invocation ID and require its time-aligned desired, available,
-and ready series before upgrading the conclusion. Its explicit lack of scale
+and ready series before upgrading the conclusion. Its `data.metrics[].points`
+are change points of a step function: each value holds until the next point and
+equal consecutive samples are not repeated, so a short list of points is a
+complete series and not a sparse one. Labels are reduced to the identifying
+deployment and namespace. `data.currentSnapshot` with `data.snapshotAt` is a
+present-time reading, not history. Its explicit lack of scale
 events is a coverage caveat, not proof that no scale event occurred. When
 `data.scaleEventsStatus` is `available_separately` and
 `list_buildbarn_events` is listed, call it with the same `invocationId` so both
@@ -435,8 +537,12 @@ not claim event-to-replica causality from timestamp alignment alone.
 ### Buildbarn Infrastructure
 
 Start with `summarize_infrastructure_health` scoped to the invocation time window. Each
-component returns its own `assessment`; drill into a component's tool when it is anything
-other than `healthy`. The vocabularies differ by component:
+component returns its own `assessment` plus an `assessmentReason` naming the rows, values,
+and thresholds the verdict was actually derived from; `get_scheduler_health`,
+`get_worker_fleet_health`, `get_storage_health`, and `get_grpc_health` return the same pair.
+Quote `assessmentReason` alongside the verdict rather than the verdict alone, and drill into
+a component's tool when it is anything other than `healthy`. The vocabularies differ by
+component:
 
 | Component | Assessment values |
 |-----------|-------------------|
@@ -450,7 +556,8 @@ component is idle or well.
 `idle` means the worker fleet did no work and nothing was queued — a quiet cluster, not a
 problem. A fleet with zero throughput **while the scheduler queue is non-empty** reports
 `stressed` instead, because that is a stuck fleet rather than an idle one. The worker payload
-carries `scheduler_queue_depth` so you can see which case the verdict found.
+carries `scheduler_queue_depth` so you can see which case the verdict found, and
+`assessmentReason` states which of the two it concluded.
 
 One assessment still misreads a quiet cluster, so check the metric before repeating it:
 
@@ -481,8 +588,8 @@ remote-action concurrency and not a count of available worker slots or replicas.
 | Unknown or unverified deployment shape | `get_buildbarn_status` | `data.status`, `data.assessment`, `data.chart`, `data.storageShards`, per-component `role`/`kind`/`readyReplicas`/`images` | Establish what is installed before reading metrics; `storageShards` is what per-shard storage series key on, so it separates a real shard from a worker-local cache series |
 | Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
 | Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
-| gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes |
-| Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence | Adjust limits or fix failing component |
+| gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes. Latency percentiles exclude the `buildbarn.remoteworker.OperationQueue` long poll, which an idle worker fleet holds open for minutes, unless `serviceFilter` names that service — `data.notes` states which applied |
+| Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence; `data.order` is `newest_first` and `data.hasMore` says whether older matches in the window were left out, so a full page is the newest slice and not the whole window. Records are projected onto diagnostic fields with the dropped names in `omittedFields` — pass `includeAllFields=true` for every ingested field | Raise `limit` or narrow `timeRange` before concluding; adjust limits or fix the failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
 | Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, secret-bearing keys, and `data.findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
 | Config suspicion | `get_buildbarn_config` plus proto-intel tools | storage, scheduler, worker fields | Validate Jsonnet/proto settings |
@@ -585,7 +692,17 @@ For a known invocation ID:
 
 ### Regression This Week
 
-1. Quantify with `summarize_project_trends(lookback="7d")` and period-over-period fields.
+1. Quantify with `summarize_project_trends(lookback="7d")` and period-over-period
+   fields. `data.coreMetrics.failed` counts finished invocations with a recorded
+   nonzero exit code, interrupted ones included; it excludes unknown and
+   unfinished outcomes, and is deliberately broader than a `status="failed"`
+   filter because that filter excludes interrupted builds. For scopes without
+   unfinished rows, `passed + failed + unknown = totalInvocations`.
+   `data.coreMetrics.totalInvocations` is the row count and `totalBuilds` is its
+   deprecated alias.
+   `patternDistribution` counts each target pattern a build requested, so a build
+   requesting several patterns is counted under each and the items can sum past the
+   invocation total.
 2. Locate the start with `get_build_timeseries` or `summarize_invocation_timeseries`.
 3. Check whether cache hit rate, queue time, action count, target duration, or
    failure rate changed.
@@ -596,12 +713,26 @@ For a known invocation ID:
 1. Resolve the ID and get `get_invocation` or `get_build_details`.
 2. For build failures, call `find_actions(result="failed")`, then
    `get_action_execution`.
-3. For tests, call `get_test_results(status="failed", includeLogs=true)`. Use `get_test_trends` and
-   `get_test_timing` for recurring or duration-related failures.
-4. Use `get_failed_action_trends` or `get_flaky_action_trends` for project-wide patterns.
-5. Check infrastructure only when failure timing or error messages point to remote
+3. Call `get_build_logs` for the invocation's redacted stdout/stderr. Each stream
+   is capped at 4096 bytes; when it is longer the head **and** the tail are both
+   kept around a marked omission and the path is listed in `truncatedFields`. Read
+   the tail — Bazel reports the failure at the end of the stream — and use
+   `errorsOrWarningsOnly` to narrow when supported.
+4. For tests, call `get_test_results(includeLogs=true)` and read `data.summary`
+   first: it is returned on every page and always describes the whole in-scope set
+   rather than the status-filtered subset, so `failedCount`, `flakyCount`,
+   `timeoutCount`, and `passedCount` tell you which verdicts exist before you
+   filter. `status="failed"` matches only the failed verdict, so repeat the call
+   with `status="flaky"` and `status="timeout"` when the summary shows those. With
+   `includeLogs=true`, `data.testResults[].logContent` is already decoded, redacted,
+   ANSI-stripped text capped at 4096 bytes with the head and tail kept around a
+   marked omission — do not base64-decode it, and check `truncatedFields` for the
+   rows that were shortened. Use `get_test_trends` and `get_test_timing` for
+   recurring or duration-related failures.
+5. Use `get_failed_action_trends` or `get_flaky_action_trends` for project-wide patterns.
+6. Check infrastructure only when failure timing or error messages point to remote
    execution, worker, storage, or network issues.
-6. Classify the failure before blaming the code. If failed actions' stderr shows a
+7. Classify the failure before blaming the code. If failed actions' stderr shows a
    dynamic loader or exec error rather than a compiler or test diagnostic —
    `version 'GLIBC_x.y' not found`, `cannot open shared object file`, `cannot execute
    binary file`, a missing ELF interpreter, or a missing interpreter such as
@@ -615,8 +746,12 @@ For remote actions that fail because they executed in the wrong userspace. The t
 dynamic loader or exec error instead of a compiler/test diagnostic. Do not report these as
 code bugs, flakes, or resource exhaustion.
 
-1. Fix the failure class. `get_invocation` — record `data.invocation.exitCode`,
-   `data.invocation.exitCodeName`, and `data.invocation.failureMessage`. A message like
+1. Fix the failure class. `get_invocation` — record `data.invocation.status` first,
+   then `data.invocation.exitCode`, `data.invocation.exitCodeName`, and
+   `data.invocation.failureMessage`. `status` is always present and is one of
+   `success`, `failed`, `interrupted`, `in_progress`, or `unknown`; `exitCode` is
+   omitted entirely when the backend never recorded one, so a missing `exitCode` is
+   not exit code 0, and `status: "unknown"` is not a success. A message like
    "`<Mnemonic>` returned a non-zero exit code when
    running remotely" points at the environment, not the build graph.
 2. Partition failed against passed. This is the discriminating step. Call
@@ -654,11 +789,15 @@ code bugs, flakes, or resource exhaustion.
    `references/REFERENCE.md` under bb-runner; a binary needing `GLIBC_2.34` cannot run on
    any glibc 2.31 image.
 6. Find the regression boundary. `list_builds` filtered to the repository gives the last
-   success and the commit delta since. `REMOTE_ERROR` with zero remote executions means no
-   worker advertised the requested platform at all; `BUILD_FAILURE` with nonzero remote
-   executions means it matched, ran, and failed in the wrong userspace. `REMOTE_ERROR`
-   flipping to `BUILD_FAILURE` across a rollout is the fingerprint of an advertised property
-   bumped without the runner image.
+   success and the commit delta since. Treat `REMOTE_ERROR` as a general remote-system
+   outcome. Conclude that no compatible worker advertised the requested platform only when
+   the invocation also has zero remote executions, its failure message explicitly reports
+   that no worker matched or supported the platform, and you have recorded the requested
+   platform. `BUILD_FAILURE` with nonzero remote executions means work matched and ran before
+   failing; combine that with the loader evidence above before calling it the wrong userspace.
+   A supported transition from no-worker `REMOTE_ERROR` evidence to userspace
+   `BUILD_FAILURE` across a rollout is the fingerprint of an advertised property bumped
+   without the runner image.
 7. Report the requested environment, the actual environment, the specific missing symbol or
    library, and which side is stale. Then list every place the platform identity is declared
    that must move together — advertised worker properties, scheduler routes keyed on the
@@ -685,9 +824,14 @@ code bugs, flakes, or resource exhaustion.
    not return geometry, key-location-map sizing, shard topology, or
    schema-validation errors, and `findings` is often empty. To audit anything you
    still need the file contents — go on to `get_buildbarn_config` for each file it
-   named. Determine whether each configured store is CAS, AC, ISCC, or FSAC from
-   the parsed configuration content, not from a filename substring or the user's
-   requested store label. Apply an optional store focus only after that mapping.
+   named. Take the CAS/AC/ISCC/FSAC mapping from `data.configurations[].stores`,
+   with the `data.configurations[].fields` that established it, rather than from a
+   filename substring or the user's requested store label; the `store` argument
+   itself now matches those semantic configuration fields rather than filenames.
+   Apply an optional store focus only after that mapping. The default scope is
+   `mounted_only`, so name the generation you read from each entry's `mounted`
+   field, and pass `includeUnmounted=true` only when you deliberately want
+   orphaned generations.
    If `analyze_buildbarn_storage` is not registered, first
    check whether `get_buildbarn_config` is present in tools/list; when it is, call
    `get_buildbarn_config(component="storage")` plus `component="frontend"`, interpret
