@@ -1,8 +1,8 @@
 # Bazel-Specific Optimization Knowledge
 
 Use this reference when Hermetiq telemetry points to Bazel configuration or build graph changes.
-Keep recommendations tied to observed metrics from tools such as GetBuildParallelism,
-GetRemoteExecutionAnalytics, GetRemoteActionTrends, GetCacheTrends, and GetTargetTrends.
+Keep recommendations tied to observed metrics from tools such as get_build_parallelism,
+analyze_remote_execution, get_remote_action_trends, get_cache_trends, and get_target_trends.
 
 ## Common `.bazelrc` Optimizations
 
@@ -18,7 +18,9 @@ Remote execution tuning:
 
 - `build --remote_timeout=3600` — Prevents timeouts on long-running actions.
 - `build --remote_retries=5` — Retries transient failures.
-- `build --jobs=<N>` — Controls parallelism. Compare with GetBuildParallelism before changing.
+- `build --jobs=<N>` — Controls parallelism. Compare with get_build_parallelism before changing.
+  Compare it only with the executing remote-action concurrency series, never with worker
+  replicas, slots, or the scheduler executing gauge.
 - `build --experimental_remote_cache_compression` — Compresses storage transfers and reduces
   input fetch/output upload time when transfer size is significant.
 - `build --remote_download_minimal` — Downloads only outputs needed locally.
@@ -42,13 +44,18 @@ Platform configuration:
 When you see these in Hermetiq data, recommend specific fixes:
 
 1. **Mega-target**: A single target with hundreds of source files.
-   - Signal: One target appears repeatedly in `expensive_targets` or GetTargetTrends with high
+   - Signal: One target appears repeatedly in `data.expensiveTargets` or `get_target_trends` with high
      action count, cost, or duration.
    - Fix: Split into smaller libraries with narrower visibility.
 
 2. **Deep dependency chain**: Long sequential chains of actions.
-   - Signal: Low parallelism in GetBuildParallelism despite many total actions, or critical path
-     trends dominated by the same target family.
+   - Signal: Low parallelism in get_build_parallelism despite many total actions, or critical path
+     trends dominated by the same target family. get_build_parallelism counts only
+     remote-executed actions and begins at the first remote action, so an empty series means no
+     remote execution was observed rather than a serial graph. A short nonempty series proves
+     remote actions ran but does not by itself diagnose the graph — confirm
+     `data.invocation.remoteExecutionEnabled` and `get_project.data.completedActionLogEnabled`
+     before reading it as a parallelism signal.
    - Fix: Flatten the dependency graph and use `implementation_deps` to reduce transitive
      dependencies where supported.
 
@@ -57,7 +64,7 @@ When you see these in Hermetiq data, recommend specific fixes:
    - Fix: Write proper Starlark rules with declared inputs and outputs.
 
 4. **Test macro explosion**: Tests that each rebuild the world.
-   - Signal: High `total_executions` for `bazel test` with many repeated actions.
+   - Signal: High `totalExecutions` for `bazel test` with many repeated actions.
    - Fix: Use shared test libraries and keep test dependencies narrow.
 
 5. **Volatile code generation**: Generators that embed timestamps or non-deterministic output.

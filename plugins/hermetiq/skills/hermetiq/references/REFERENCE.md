@@ -2,18 +2,40 @@
 
 ## Tool Call Constraints (Important)
 
-- Prefer `ListBuilds` for user-facing build history because it groups multiple attempts by
-  `build_id`. Use `ListInvocations` when you specifically need individual attempts.
-- Use `ResolveBuildOrInvocation` when the user provides an opaque ID from a URL, copied text,
+- Prefer `list_builds` for user-facing build history because it groups multiple attempts by
+  `buildId`. Use `list_invocations` when you specifically need individual attempts.
+- Use `resolve_build_or_invocation` when the user provides an opaque ID from a URL, copied text,
   or older permalink. It tells you whether to call build-level or invocation-level tools.
-- `ListInvocations` does not return full command-line arguments. To audit flags, first select
-  invocations with `ListInvocations`, then call `GetInvocation(include_cmd_line=true)` for each.
-- `ListBuilds`, `GetBuildHistorySummary`, and `GetBuildTimeseriesAgg` filter through
-  `invocation_filter`; use `BuildAggregationOptions` to choose match and rollup semantics.
-- `GetFilters` excludes high-cardinality pattern values to keep filter loads bounded. Use
-  `LookupPatternsForFilters(project_id, query)` for project-scoped pattern type-ahead lookups.
-- Prefer stable aggregation tools (`GetRemoteExecutionAnalytics`, `GetRemoteActionTrends`) for
-  transfer and timing bottlenecks before drilling into individual `FindRemoteActions` records.
+- `list_invocations` does not return full command-line arguments. To audit flags, first select
+  invocations with `list_invocations`, then call
+  `get_invocation(invocationId=..., includeCommandLine=true)` for each.
+- Build history tools accept bounded public filters directly: `lookback`, `repository`,
+  `branch`, `command`, and `status`. The `status` vocabulary is `success` (alias `ok`),
+  `failed` (aliases `error`, `failure`), `remote_error`, `in_progress`, and `interrupted`.
+  `remote_error` is a strict subset of `failed` — numeric Bazel exit code 34 — not an alias
+  for it, and no value selects an `unknown` invocation. It denotes a general remote-system
+  outcome, not specifically a missing compatible worker. That diagnosis also requires zero
+  remote executions, matching failure-message evidence, and the requested platform.
+  Aggregated trend tools take the same values in a `statuses` array, and
+  `list_filter_values(field="status")` returns this static vocabulary. Do not construct
+  protobuf filter or aggregation objects.
+- `get_invocation_insights` is invocation-scoped. It exposes the current typed recommendation
+  schema for the same profile-derived action-plan surface that `get_invocation` also surfaces
+  under `data.profile.insights`, without loading the full invocation payload.
+- `get_profile_trends` is project/time-window scoped. Use `lookback` (`"3d"`, `"7d"`, `"15d"`,
+  or `"30d"`) and low-cardinality filters. Leave `forceRaw=false` for broad dashboards; use
+  `forceRaw=true` only for narrow exact/debug reads.
+- `list_filter_values` is the only public filter-discovery facade. It intentionally excludes
+  high-cardinality pattern type-ahead; do not synthesize an internal lookup tool.
+- Prefer stable aggregation tools (`analyze_remote_execution`, `get_remote_action_trends`) for
+  transfer and timing bottlenecks before drilling into individual `find_remote_actions` records.
+- `find_actions` reads the Bazel-reported action stream, which in practice records only
+  failures, so `result="success"` legitimately returns 0 rows on a build that executed
+  thousands of actions. Use `find_remote_actions` for successful remote executions. `label`
+  is a case-insensitive substring match while `mnemonic` is exact and case-sensitive.
+- `list_targets` describes the build phase only (Bazel's `TargetComplete` event): a target
+  that built but whose test run failed is `success` with no `failureDetail` and is excluded
+  by `result="failed"`. Use `find_actions` or `get_test_results` for test outcomes.
 - When prompt orchestration is unavailable in a client, use direct tool-call equivalents from
   the skill playbooks.
 
@@ -22,16 +44,16 @@
 ## Hermetiq Data Model
 
 ### Build
-The logical build entity. One `build_id` can contain multiple invocations/attempts for retries,
-reruns, or related upload flows. Build-level tools aggregate attempts by `build_id` and are the
+The logical build entity. One `buildId` can contain multiple invocations/attempts for retries,
+reruns, or related upload flows. Build-level tools aggregate attempts by `buildId` and are the
 right starting point for user-facing history, summaries, build detail pages, and trend cards.
 
 Key build-level tools:
-- `ListBuilds` — paginated logical build history grouped by `build_id`
-- `GetBuild` / `GetBuildDetails` — one logical build and its attempts
-- `GetBuildHistorySummary` — summary counts over a build universe
-- `GetBuildTimeseriesAgg` — build-level counts over time
-- `GetBuildTargetFastAnalytics` / `GetBuildTargetSlowAnalytics` — build-scoped target analytics
+- `list_builds` — paginated logical build history grouped by `buildId`
+- `get_build` / `get_build_details` — one logical build and its attempts
+- `summarize_build_history` — summary counts over a build universe
+- `get_build_timeseries` — build-level counts over time
+- `get_build_target_summary` / `analyze_build_targets` — build-scoped target analytics
 
 ### Invocation (Attempt)
 One per `bazel build|test|run|query` command execution. Use invocation-level tools when a
@@ -39,25 +61,37 @@ workflow needs a concrete attempt, per-action data, logs, command lines, tests, 
 remote execution analytics, or parallelism data.
 
 Key fields for optimization analysis:
-- `invocation_id` — one attempt
-- `build_id` — logical build ID shared by related attempts when present
-- `remote_cache_enabled` / `remote_execution_enabled` — Whether remote cache and remote execution were enabled
-- `remote_cache_hits` / `total_executions` — Quick cache signal from the invocation summary
-- `internal_executions` / `local_executions` / `remote_executions` — Execution strategy breakdown
-- `disk_cache_hits` — Actions served from local disk cache without checking remote
-- `critical_path_log` / `process_stats_log` — Raw critical path (the longest chain of sequential dependencies) and basic process stats logs (semi-structured text)
+- `status` — always present: `success`, `failed`, `interrupted`, `in_progress`, or `unknown`
+  (the invocation ended with no recorded exit code). This is the field to read for outcome.
+- `exitCode` / `exitCodeName` — `exitCode` is **absent**, not 0, when the backend recorded
+  none; `status: "unknown"` is exactly that case. No status filter can select `unknown`.
+- `invocationId` — one attempt
+- `buildId` — logical build ID shared by related attempts when present
+- `remoteCacheEnabled` / `remoteExecutionEnabled` — Whether remote cache and remote execution were enabled
+- `remoteCacheHits` / `totalExecutions` — Quick cache signal from the invocation summary
+- `internalExecutions` / `localExecutions` / `remoteExecutions` — Execution strategy breakdown
+- `diskCacheHits` — Actions served from local disk cache without checking remote
+- `criticalPathLog` / `processStatsLog` — Raw critical path (the longest chain of sequential dependencies) and basic process stats logs (semi-structured text)
+- `profile` — Parsed Bazel JSON trace profile summary, including wall-time anatomy,
+  remote phase totals, bottleneck classification, action parallelism, resource pressure, and
+  profile-derived insights
 - `command` — Which Bazel command (build, test, run, cquery, aquery)
-- `platform_name` / `cpu` — Target platform (affects cache partitioning)
+- `platformName` / `cpu` — Target platform (affects cache partitioning)
+
+Key invocation-level tools:
+- `get_build_logs` — redacted stdout/stderr for one completed invocation. Each stream is
+  capped at 4096 bytes with the head **and** the tail kept around a marked omission; read the
+  tail, because Bazel reports the failure at the end of the stream.
 
 ### CacheEvent
 One record per Action Cache lookup intercepted by Hermetiq's gRPC cache proxy.
 
 Key fields:
 - `hit` — Boolean; the most important field
-- `action_mnemonic` — Action type (CppCompile, Javac, etc.)
-- `digest_hash` / `digest_size` — Content-addressed action identifier
-- `duration_micros` — Cache lookup latency
-- `CacheMissAnalysis.reason` — Why the lookup missed when `include_miss_analysis=true`:
+- `actionMnemonic` — Action type (CppCompile, Javac, etc.)
+- `digestHash` / `digestSize` — Content-addressed action identifier
+- `durationMicros` — Cache lookup latency
+- `CacheMissAnalysis.reason` — Why the lookup missed when `includeMissAnalysis=true`:
   - `NEVER_CACHED` — No prior cache entry exists for this action
   - `INPUT_CHANGED` — The action's input tree changed (most common)
   - `COMMAND_CHANGED` — The command line or flags changed
@@ -66,38 +100,49 @@ Key fields:
   - `CACHE_EVICTED` — Entry existed but was evicted from storage
   - `PLATFORM_SUFFIX_CHANGED` — Platform configuration drift
   - `INSTANCE_MISMATCH` — Different remote cache instance
-- `input_root_digest` / `command_digest` / `environment_hash` / `platform_hash` — Metadata
+  - `INSUFFICIENT_TRACKED_HISTORY` — The tracked lookback did not reach far enough back to
+    see a prior entry for this action
+- `inputRootDigest` / `commandDigest` / `environmentHash` / `platformHash` — Metadata
   used to determine miss reasons by comparing against previous hits
+
+`summarize_cache_events.data.aggregations.byMissReason` can additionally report `UNKNOWN`
+(enrichment ran and could not classify), `NOT_ENRICHED` (still queued for CAS enrichment),
+and `ENRICHMENT_UNAVAILABLE` (enrichment gave up because the CAS metadata never arrived).
+Those are pipeline states rather than classifications and are not accepted as a `reason`
+filter; `reason: "unknown"` is rejected outright because the backend reads it as "no filter".
+A cache HIT row carries no `missReason` at all.
 
 ### RemoteAction
 One record per action executed on a Buildbarn worker. Provides granular phase timing.
 
 Key fields:
 - **Phase timestamps** (all optional, presence depends on execution path):
-  - `queued_at` to `worker_started_at` = queue wait
-  - `input_fetch_started_at` to `input_fetch_completed_at` = input staging
-  - `execution_started_at` to `execution_completed_at` = actual work
-  - `output_upload_started_at` to `output_upload_completed_at` = result staging
+  - `queuedAt` to `workerStartedAt` = queue wait
+  - `inputFetchStartedAt` to `inputFetchCompletedAt` = input staging
+  - `executionStartedAt` to `executionCompletedAt` = actual work
+  - `outputUploadStartedAt` to `outputUploadCompletedAt` = result staging
 - **Resource usage** (POSIX):
-  - `resource_usage.user_time_nanos` / `resource_usage.system_time_nanos` — CPU time consumed
-  - `resource_usage.block_input_operations` / `resource_usage.block_output_operations` — I/O operations
+  - `resourceUsage.userTimeNanos` / `resourceUsage.systemTimeNanos` — CPU time consumed
+  - `resourceUsage.blockInputOperations` / `resourceUsage.blockOutputOperations` — I/O operations
 - `cost` — Normalized execution cost for this action
-- `worker_node` / `worker_pod` — Which worker handled this action
-- `cached_result` — Whether the result came from the remote Action Cache
-- `mnemonic` / `target_id` — Action type and build target
-- `output_file` — Output paths and digests
+- `workerNode` / `workerPod` — Which worker handled this action
+- `cachedResult` — Whether the result came from the remote Action Cache
+- `mnemonic` / `targetId` — Action type and build target
+- `outputFile` — Output paths and digests
 
 ### BuildMetrics
 Aggregate build-level metrics reported by Bazel itself (one per invocation).
 
 Key fields:
-- `actions_created` / `actions_executed` — Total action graph size versus what ran
-- `action_cache_hits` / `action_cache_misses` — Bazel's own local Action Cache stats
-- `analysis_duration` / `execution_duration` / `total_duration` — Build phase timing
-- `cpu_duration` — CPU time
-- `bytes_sent` / `bytes_received` — Network I/O during the build
-- Content Addressable Storage operation metrics: `cas_operations`, `cas_operations_avg_ms`,
-  `cas_remote_download*`, `cas_remote_upload*`
+- `actionsCreated` / `actionsExecuted` — Total action graph size versus what ran
+- `actionCacheHits` / `actionCacheMisses` — Bazel's own local Action Cache stats
+- `analysisDuration` / `executionDuration` / `totalDuration` — Build phase timing
+- `cpuDuration` — CPU time
+- `bytesSent` / `bytesReceived` — whole-host network counters for the machine that ran the
+  build, **not** Bazel remote-cache traffic. Never quote them as Content Addressable Storage
+  or Action Cache transfer volume, and never size a transfer optimization from them.
+- Content Addressable Storage operation metrics: `casOperations`, `casOperationsAvgMs`,
+  `casRemoteDownload*`, `casRemoteUpload*`
 
 ### ActionData
 Per-mnemonic aggregated action statistics (one row per mnemonic per invocation).
@@ -105,94 +150,211 @@ Per-mnemonic aggregated action statistics (one row per mnemonic per invocation).
 Key fields:
 - `mnemonic` — Action type
 - `executed` / `created` — How many ran versus were in the graph
-- `first_started_ms` / `last_ended_ms` — Temporal span of this mnemonic's executions
+- `firstStartedMs` / `lastEndedMs` — Temporal span of this mnemonic's executions
+
+`get_invocation`'s `actions.byMnemonic` is Bazel's own `action_data` for its heaviest
+mnemonics only: it does **not** sum to `actions.total`, its `created` counter is **not**
+comparable with `metrics.actionsCreated`, and `actionsTruncated` is set whenever those rows
+account for fewer actions than `actions.total`. Never present a byMnemonic total as the
+invocation's action count.
+
+### Invocation profile and profile insights
+`get_invocation` exposes a compact, model-facing Bazel JSON trace profile under
+`data.profile`. It lets agents explain the broad time split without reconstructing raw trace
+events.
+
+Exact fields:
+- `bazelVersion`
+- `wallTimeSeconds`, `analysisSeconds`, `executionSeconds`
+- `remoteExecutionSeconds`, `remoteQueueSeconds`, `criticalPathSeconds`, `gcSeconds`
+- `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
+- `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
+  `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
+  `caveats`
+
+Raw microsecond phase fields, fetch/upload/output-download subphases, GC counts, resource
+arrays, timeline segments, and hotspot arrays are not exposed in this payload. Use the trend or
+dedicated drill-down tools when those surfaces are needed. Prefer `get_invocation_insights` for
+the current typed insight schema when only the action plan is needed.
+
+`get_invocation_insights` returns typed records under `data.insights`:
+- `insightId` — stable key for dedupe and per-rule links.
+- `pillar` — `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, or `PROFILE_QUALITY`.
+- `title`, `summary`, `recommendation` — user-facing copy.
+- `estimatedSavings.percentOfWallTime`, `estimatedSavings.seconds`,
+  `estimatedSavings.humanReadable` — rough savings projection; percent is the ranking key.
+- `caveats` — uncertainty notes that must be surfaced with the recommendation.
+- `affectedItems` — typed pointers (`ACTION`, `TARGET`, `MNEMONIC`, `PHASE`, `FLAG`) with an
+  optional metric label and duration. Use these to choose drill-down calls.
+
+Insight workflow:
+1. Resolve the user's ID; if it is a build ID, choose the primary/latest invocation attempt from
+   `get_build_details`.
+2. Call `get_invocation_insights(invocationId=...)`.
+3. Rank by `data.insights[].estimatedSavings.percentOfWallTime`, keeping qualitative insights when no
+   numeric savings are available.
+4. Validate the top insights with the smallest underlying tool call: `find_actions`,
+   `find_cache_events(includeMissAnalysis=true)`, `analyze_remote_execution`, or
+   `get_build_parallelism`.
+5. For a remote-capacity claim, first confirm remote execution and
+   `data.completedActionLogEnabled`. Compare only executing remote-action
+   concurrency with a complete last-wins numeric `--jobs`; the scheduler executing
+   gauge, participating workers, worker slots, and replicas are different quantities.
+   Treat a padded scheduler window as shared corroboration and require time-aligned
+   desired/available/ready replica or scale-event history to prove autoscaler delay.
+   When listed, `get_worker_scaling_timeline` is the canonical historical replica
+   view; absent/incomplete series or unavailable scale events preserve the
+   hypothesis. When `data.scaleEventsStatus` is `available_separately`, use
+   `list_buildbarn_events` with the same invocation window when listed, while
+   treating timestamp alignment as correlation rather than event-to-replica causality.
+6. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
+
+Profile bottleneck glossary:
+
+| `bottleneckKind` | Definition | Actionable follow-up |
+|-------------------|------------|----------------------|
+| `process_bound` | Remote worker time is mostly spent running the action process itself. In Bazel terms, the command inside the sandbox, such as compiler, linker, test runner, or codegen tool, is the long pole rather than queueing, input fetch, cache checks, uploads, or output download. | Inspect related actions and mnemonics; split large targets, shard long tests, improve persistent workers, tune compiler/linker/test flags, or use larger workers only when resource signals show CPU or memory saturation. More workers usually will not shorten one serial action. |
+| `analysis_bound` | Bazel loading/analysis dominates before action execution. | Trim broad target patterns, reduce macro/rule analysis work, simplify dependency fanout, and investigate expensive repository or rule setup. |
+| `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `analyze_remote_execution.data.queueWaitStats` and `get_scheduler_health`; scale or rebalance workers for the affected platform. |
+| `fetch_bound` | Workers spend a large share fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker cache locality or virtual filesystem/prefetching, and check storage latency. |
+| `upload_bound` | Workers spend a large share uploading outputs. | Shrink outputs, avoid unnecessary declared outputs, and check storage upload health. |
+| `output_download_bound` | The Bazel client spends too much wall time downloading remote outputs. | Prefer `--remote_download_outputs=toplevel` or `minimal` where compatible and reduce top-level output volume. |
+| `cache_check_bound` | Action Cache checks, Merkle tree construction, or missing-digest lookups consume a large share. | Check cache hit/miss data and storage latency with `summarize_cache_events`, `find_cache_events`, and `get_storage_health`. |
+| `client_resource_bound` | Bazel client host load, memory, or JVM garbage collection pressure limits progress. | Use profile resource and GC metrics; increase client resources, tune Bazel JVM settings, or reduce analysis breadth. |
+| `unknown` or empty | Profile data is missing, incomplete, or does not have a clear dominant signal. | Treat profile-derived conclusions as low confidence and fall back to cache, remote execution, critical path, and infrastructure tools. |
 
 ---
 
 ## Hermetiq Aggregated Analytics
 
 ### Build History (logical build grouping)
-- `ListBuilds` — grouped build rows with primary invocation, attempt counts, status rollups,
-  cache/execution totals, and pagination.
-- `GetBuildHistorySummary` — total logical builds plus success, failure, interrupted, and
-  in-progress counts over the selected build universe.
-- `GetBuildTimeseriesAgg` — build counts bucketed by time with build-level status rollups.
-- `BuildAggregationOptions.match_scope`:
-  - `ANY_MATCHING_INVOCATION` — a build matches if any invocation matches the filters.
-  - `LATEST_INVOCATION_ONLY` — a build matches based on its latest invocation only.
-- `BuildAggregationOptions.rollup_scope`:
-  - `MATCHING_INVOCATIONS_ONLY` — rollups summarize only matching invocations.
-  - `ALL_INVOCATIONS_IN_SELECTED_BUILDS` — rollups include every invocation for selected builds.
+- `list_builds` — grouped build rows with primary invocation, attempt counts, status rollups,
+  cache/execution totals, and pagination. Each `BuildSummary` row (also used by build-detail
+  surfaces) exposes `invocationCount`, `successCount`, `failureCount`, `interruptedCount`,
+  `inProgressCount`, and `unknownCount`; those five outcome counters account for every attempt.
+- `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` with exactly
+  `totalBuildCount`, `successCount`, `failureCount`, `interruptedCount`, and
+  `inProgressCount`. It has neither `unknownCount` nor `invocationCount`, so do not apply the
+  per-build five-counter invariant to this response. Its outcome counters can sum below
+  `totalBuildCount` when a logical build has only unknown attempts.
+- `get_build_timeseries` — build counts bucketed by time with build-level status rollups.
+- These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
 ### CacheEventAgg (per-invocation)
-- `total_actions`, `hit_count`, `miss_count`, `hit_rate`
-- `by_mnemonic` — Per-action-type breakdown
-- `by_instance` — Per-cache-instance breakdown
-- `top_miss_targets` — Targets with most misses
-- `slowest_actions` — Highest cache lookup latency
-- `by_miss_reason` — Count per reason category
+- `data.aggregations.totalActions`, `data.aggregations.hitCount`,
+  `data.aggregations.missCount`, `data.aggregations.hitRate`
+- `data.aggregations.byMnemonic` — Per-action-type breakdown
+- `data.aggregations.byInstance` — Per-cache-instance breakdown
+- `data.aggregations.topMissTargets` — Targets with most misses
+- `data.aggregations.slowestActions` — Highest cache lookup latency
+- `data.aggregations.byMissReason` — Count per reason category
 
 ### CacheTrends (cross-build, time-windowed)
-- `summary` — Total lookups, hit rate, average latency over the period
-- `buckets` — Per-day hit rates and lookup volumes
-- `buckets.miss_reasons` — How miss reasons distribute over time
-- `mnemonic_day_heatmap` — Mnemonic × day hit rate grid
-- `top_miss_targets` — Targets with most misses over the period
+Every `hitRate` and `byteHitRate` in this payload — `summary`, `buckets`, `byMnemonic`,
+`topMissTargets`, and the heatmap — is a fraction from 0 to 1, matching
+`summarize_cache_events` and `group_cache_events`. `data.digestReuse.reuseRatePct`
+remains a percentage from 0 to 100 because the unit is explicit in its field name.
+- `data.summary` — Total lookups, hit rate, average latency over the period
+- `data.summary.hitRateChange` — change in the hit-rate fraction against the immediately
+  preceding window of the same length (`0.05` means +5 percentage points); absent when either
+  window recorded no lookups
+- `data.buckets` — Per-day hit rates and lookup volumes
+- `data.buckets[].missReasons` — How miss reasons distribute over time
+- `data.mnemonicDayHeatmap` — Mnemonic × day hit rate grid. **Omitted unless
+  `includeMnemonicDayHeatmap=true`**: it is the largest part of this payload and is capped at
+  200 cells. When omitted the response says so in `data.note` and names it in
+  `truncatedFields` — its absence is not "no per-mnemonic data".
+- `data.topMissTargets` — Targets with most misses over the period
 
 ### RemoteExecutionAnalytics (per-invocation)
-- `total_cost`, `total_actions`, `total_execution_seconds`
-- `unique_workers`, `unique_mnemonics`, `avg_parallelism`
+Fields below are under `data` and use proto-JSON camelCase:
+- `totalCost`, `totalActions`, `totalExecutionSeconds`
+- `uniqueWorkers`, `uniqueMnemonics`, `avgParallelism`
 - `stats` — Per-mnemonic phase breakdown (queue/fetch/execute/upload)
-- `slowest_actions` — Top N by execution time
-- `expensive_targets` — Top N by total cost
-- `queue_wait_stats` — Per-mnemonic 50th/95th/99th percentile and max queue wait
-- `io_hotspots` — Actions with highest block I/O
+- `slowestActions` — Top N by execution time
+- `expensiveTargets` — Top N by total cost
+- `queueWaitStats` — Per-mnemonic 50th/95th/99th percentile and max queue wait
+- `ioHotspots` — Actions with highest block I/O
 - `workers` — Per-worker action count and cost
-- `cpu_efficiency_stats` — Per-mnemonic CPU utilization percentage
-- `cache_miss_candidates` — Actions executed multiple times (same digest)
-- `cache_summary` — Unique digests, repeated actions, potential savings
+- `cpuEfficiencyStats` — Per-mnemonic CPU utilization percentage
+- `cacheMissCandidates` — Actions executed multiple times (same digest)
+- `cacheSummary` — Unique digests, repeated actions, potential savings
 
 ### RemoteActionTrends (cross-build, time-windowed)
-- `summary` — Totals and period-over-period percentage changes for:
-  wall_time, action_count, cost, cpu_time, build_count
-- `buckets` — Action counts, costs, timing per day
-- `mnemonics` — Distribution of action types
-- `phase_breakdown` — Per-mnemonic average timing per phase
-- `slowest_actions` — Top 50 across all builds
-- `expensive_targets` — Top 50 across all builds
-- `io_hotspots` — Top 50 by block I/O
-- `cpu_efficiency` — Utilization percentage, user/system ratio, I/O-bound count
-- `fleet_utilization` — Daily unique workers, churn (new versus returning), average actions/worker
+- `data.summary` — Totals and period-over-period percentage changes for wall time,
+  action count, cost, CPU time, and build count
+- `data.buckets` — Action counts, costs, timing per day
+- `data.mnemonics` — Distribution of action types
+- `data.phaseBreakdown` — Per-mnemonic average timing per phase
+- `data.slowestActions` — Top 50 across all builds
+- `data.expensiveTargets` — Top 50 across all builds
+- `data.ioHotspots` — Top 50 by block I/O
+- `data.cpuEfficiency` — Utilization percentage, user/system ratio, I/O-bound count
+- `data.fleetUtilization` — Daily unique workers, churn (new versus returning), average actions/worker
 
 ### TargetTrends (cross-build, time-windowed)
 - `summary` — total target runs, distinct targets, distinct invocations, success/failure counts,
   and total/average duration.
 - `targets` — paginated per-target rows with kind, run count, invocation count, success/failure
   counts, total duration, and min/average/max duration.
-- `GetTargetTrendDetail` — daily duration buckets and recent invocations for one target row.
+- `get_target_trend_detail` — daily duration buckets and recent invocations for one target row.
 - Use this when build duration or failures appear concentrated in a few targets, or when users
   ask which targets are getting slower over time.
 
+### ProfileTrends (cross-build, time-windowed)
+Use `get_profile_trends` for Bazel JSON trace profile questions across a project or filtered build
+set. The public request supports `lookback`, `pattern`, `repository`, `branch`, `commands`,
+`users`, `statuses`, and `forceRaw`.
+
+Response fields are under `data` and use proto-JSON camelCase:
+- `summary.totalBuilds` / `summary.buildsWithProfile` — profile coverage. Low coverage means
+  profile conclusions are conditional.
+- `summary.avgBuildWallTimeMicros`, `avgAnalysisWallMicros`,
+  `avgExecutionWallMicros`, and `avgActionTotalMicros` — build time anatomy and effective
+  action parallelism.
+- `summary.remoteQueueMicrosSum`, `remoteFetchMicrosSum`,
+  `remoteProcessMicrosSum`, `remoteUploadMicrosSum`,
+  `remoteOutputDownloadMicrosSum`, and `remoteCacheCheckMicrosSum` — remote phase mix.
+- `summary.topBottleneckKind` / `summary.topBottleneckShare` — dominant profile bottleneck
+  classification over the selected window.
+- `summary.avgPeakMemoryMb`, `avgPeakLoad`, `avgGcTotalMicros`, and
+  `majorGcBuildCount` — client resource and Bazel JVM health.
+- `summary.skymeldBuildCount`, `summary.skymeldShare`, and
+  `bazelVersionDistribution` — build configuration drift and Skymeld adoption signals.
+- `buckets` — daily time series for charting build anatomy, remote phase mix, bottleneck movement,
+  memory, GC, and Skymeld adoption.
+- `phaseTrends`, `bottleneckTrends`, `resourceTrends`, and `mnemonicTrends` — bounded
+  low-cardinality profile rollups. Use mnemonic trends to identify action classes, not individual
+  targets.
+- `diagnostics` — precomputed MCP-friendly findings. Cite the diagnostic, then verify the
+  recommendation against summary/trend metrics or a focused drill-down tool.
+- `usedRollups` — whether the server used scalable hourly rollups. Prefer rollups for broad
+  dashboards; use `forceRaw=true` only for narrow exact/debug reads.
+
+Profile trend workflow:
+1. Call `get_profile_trends(lookback="7d")` unless the user chooses another window.
+2. Report profile coverage and whether rollups were used.
+3. Explain the dominant bottleneck using `top_bottleneckKind`, phase sums, and resource trends.
+4. Drill down only where the profile points: queue -> infrastructure/remote execution, process ->
+   actions and critical path, analysis -> Bazel/rule graph, cache-check -> cache/storage.
+5. Pair with `get_critical_path_trends`, `get_remote_action_trends`, `get_cache_trends`, or
+   infrastructure tools only when those tools test a specific profile-derived hypothesis.
+
 ### Project-Level Action and Activity Tools
 
-These all take a `TrendsAggregatedRequest` (`project_id`, `time_range`, optional `filters` as a
-`ListInvocationsRequest`) and return project-scoped rollups. `time_range` accepts `"7d"`, `"15d"`,
-or `"30d"`.
+These tools are scoped to the authenticated project by the server. Their public inputs use a
+bounded `lookback` plus the exact optional filters listed in `tools/list`; they do not accept a
+project override or protobuf request object.
 
-- `GetProjectActivity` — high-level project activity counts and trends. Use for "how active is
+- `get_project_activity` — high-level project activity counts and trends. Use for "how active is
   this project?" overview cards and for sanity-checking whether a project is still in use before
   recommending optimizations.
-- `GetFailedActions` — top failed actions, daily failure counts, failure-detail breakdown,
+- `get_failed_action_trends` — top failed actions, daily failure counts, failure-detail breakdown,
   failure novelty, and aborted reasons. Use for project-wide failure pattern analysis when a
-  single-build view (`FindActions(result_filter=ACTION_FAILED)`) is insufficient.
-- `GetFlakyActions` — flakiest actions across the project. Loaded asynchronously by dashboards
+  single-build view (`find_actions(result="failed")`) is insufficient.
+- `get_flaky_action_trends` — flakiest actions across the project. Loaded asynchronously by dashboards
   because the analysis is more expensive than the standard failure rollup. Use for the FLAKY
   bucket in test-failure investigations.
-
-### Pattern Type-Ahead
-
-- `LookupPatternsForFilters(project_id, query)` returns a bounded subset of Bazel patterns for
-  type-ahead UIs. `GetFilters` intentionally excludes patterns due to their cardinality.
 
 ---
 
@@ -319,35 +481,56 @@ without changing the declared input hash. This causes:
 
 #### Local Storage Backend
 The primary on-disk backend (`LocalBlobAccess`) concatenates blobs into a large file or raw
-block device, indexed by a **cuckoo hash table**. The hash table preferentially displaces
-older entries, making it self-cleaning with no garbage collection.
+block device, indexed by a fixed-size open-addressed **key-location map** that preferentially
+displaces older entries, making it self-cleaning with no garbage collection — and meaning it
+**never grows**: sizing it is an explicit operator decision.
 
-**Block rotation model**: The storage device is divided into blocks that serve four roles.
-Blocks rotate through these roles over time as data ages:
+**Block rotation model**: The storage is divided into fixed-size blocks that serve four
+roles. **The block is the unit of eviction** — when the oldest *new* block fills, the ranges
+rotate forward and the oldest *old* block is discarded whole; there is no per-blob garbage
+collection:
 
-1. **Old blocks** (typical: 6-8): When a blob in an old block is read, it is copied forward
-   to a new block. This implements pseudo least-recently-used eviction — frequently accessed
-   blobs survive longer. Fewer old blocks makes eviction more first-in-first-out. More old
-   blocks improves retention of hot data but increases copy overhead.
-2. **Current blocks** (typical: 24-46): Stable storage. Should be the majority of the device.
+1. **Old blocks** (typical: 8): When a blob in an old block is read, it is copied forward
+   to a new block ("refresh"). This implements pseudo least-recently-used eviction —
+   frequently accessed blobs survive longer. Fewer old blocks makes eviction more
+   first-in-first-out. More old blocks improves retention of hot data but stores duplicates.
+2. **Current blocks** (typical: 24-30): Stable storage. Should be the majority of the device.
    No copy-forward overhead for reads.
-3. **New blocks** (typical: 1-4): Where new writes and copy-forward data land. Content
-   Addressable Storage should use 2-4 to spread write load and stagger expiration. Action
-   Cache needs only 1.
-4. **Spare blocks** (typical: 3-4): Only used with raw block devices. Buffer so ongoing reads
-   can complete before the underlying block is recycled.
+3. **New blocks**: Where new writes and copy-forward data land. Content Addressable Storage
+   should use 3 (2-4 acceptable) to spread write load and stagger expiration. The Action
+   Cache, Initial Size Class Cache, and File System Access Cache are mutable stores and
+   **must use 1** — bb-storage refuses to start them otherwise.
+4. **Spare blocks** (typical: 3): Buffer so ongoing reads can complete before a rotated-out
+   block is recycled. Applies to `blocksOnBlockDevice` with file-backed *and* raw-device
+   sources. Too few risks `No unused blocks available` write failures.
 
-**Key sizing formula**: `max_blob_size = device_size / total_blocks`
+**Key sizing formula**: `block size = blocks bytes / total_blocks`, and one block is the
+**maximum storable blob**. More than 100 total blocks is a startup failure.
 
-**Hash table configuration**:
+**Key-location map configuration**:
 - `keyLocationMapMaximumGetAttempts`: 16 (recommended). Controls hash slot probes before
-  declaring a miss. Higher tolerates more collisions but slows lookups.
-- `keyLocationMapMaximumPutAttempts`: 64 (recommended).
-- Record count should be **prime** for optimal hash distribution.
+  declaring a miss. Unset or zero makes every lookup probe one slot.
+- `keyLocationMapMaximumPutAttempts`: 64 (recommended). Unset or zero silently drops every insert.
+- Size it at **2-10x the expected live object count** (`usable bytes / average blob size`).
+  In-memory maps cost ~64 bytes per entry of eagerly allocated heap; on-disk maps ~66 bytes
+  per record, with the record count automatically rounded down to a prime (no need to
+  pre-compute primes).
+- An undersized map fails **silently**: inserts displace older entries and eventually drop,
+  so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`,
+  `hash_put_too_many_iterations`, and `hash_put_ignored_invalid` rows in `get_storage_health`. **The map and the blocks are coupled** — growing the disk without
+  growing the map makes eviction worse.
 - Can be stored in-memory (faster, lost on restart) or on block device (persistent).
 
-**Persistence**: `minimumEpochInterval` controls fsync frequency. Default 300 seconds.
-On SIGTERM, data is synced before shutdown.
+**Persistence**: a store survives restarts only when three pieces survive together — the
+blocks, the key-location map, and the `persistent` state directory. A store with an
+in-memory key-location map restarts **empty** regardless of disk durability (and combining
+`persistent` with an in-memory map is a misconfiguration: blocks reattach full of
+unreachable data). `minimumEpochInterval` controls state sync frequency (default 300
+seconds), which also bounds crash loss to roughly that window. On SIGTERM, data is synced
+before shutdown (two full device syncs — give the pod enough termination grace).
+**Changing any block count or the blocks/device size changes the derived block size, and a
+persistent store discards ALL of its data on the next start** — treat geometry changes as
+planned cache flushes.
 
 #### Sharding
 Distributes blobs across multiple storage backends by digest hash. Each shard has a `weight`
@@ -380,7 +563,11 @@ FindMissingBlobs request rates from many concurrent Bazel clients.
 
 #### Action Result Expiring
 Forces periodic rebuilds by expiring Action Cache entries after a configurable duration.
-Computed from `worker_completed_timestamp` with jitter to prevent rebuild storms.
+Computed from `worker_completed_timestamp` with deterministic jitter to prevent rebuild
+storms. `maximumValidityJitter` must be **nonzero**: an explicit `'0s'` panics on the first
+Action Cache hit, and leaving it unset fails startup. `minimumTimestamp` is a manual flush
+knob — setting it to "now" hides every previously cached result without touching the
+Content Addressable Storage.
 
 ### bb-scheduler: The Dispatcher
 
@@ -456,54 +643,81 @@ Two variants:
 
 Worker ↔ runner communication uses gRPC over a Unix socket for security isolation.
 
-### Hermetiq Production Configuration Reference
+#### The `container-image` property is a matching key, not an image to pull
 
-| Parameter | Development | Production | Notes |
-|-----------|-------------|------------|-------|
-| Content Addressable Storage disk size | 32 GB | 650 GB | 20x larger |
-| Content Addressable Storage key_location_map | 400 MB | 800 MB | On block device |
-| Content Addressable Storage old/current/new blocks | 8/24/3 | 6/46/2 | Production favors current blocks |
-| Action Cache size | 20 MB | 5 GB | 250x larger |
-| Action Cache key_location_map | 1 MB (disk) | 5M entries (memory) | Production uses in-memory for speed |
-| Storage shards | 2 | 3 | Equal weight |
-| Max tree size (completeness) | 64 MB | 256 MB | |
-| Max message size | 2 MB | 10 MB | |
-| Worker concurrency | 8 | 11 | |
-| Worker file cache files | 10,000 | 100,000 | 10x |
-| Worker file cache size | 1 GB | 5 GB | 5x |
-| Worker directory cache | 1,000/1 MB | 5,000/10 MB | 5x/10x |
-| Input download concurrency | 10 | 9 | Slightly reduced |
-| Output upload concurrency | 11 | 11 | Same |
-| Scheduler execution timeout | 1,800 seconds | 1,800 seconds | 30 minutes |
-| Scheduler max timeout | 7,200 seconds | 7,200 seconds | 2 hours |
-| Queue no-workers timeout | 900 seconds | 900 seconds | 15 minutes |
-| Tracing | Disabled | 25% sample rate | To OpenTelemetry collector |
-| Scheduler routing | Simple | Demultiplexing | Multi-container platform support |
+Buildbarn **does not pull the `container-image` platform property**. Unlike some remote execution
+services, there is no per-action container launch. The property is only an opaque string the
+scheduler uses to route an action to a platform queue. The userspace an action actually executes in
+comes from the **runner container image** in the worker pool's Deployment pod spec.
+
+Consequences:
+- A pool can advertise `container-image: docker://example/build@sha256:abc…` while its runner image
+  is something entirely different. Deployments do this deliberately so clients that hardcode an
+  image digest can match a pool that provides an equivalent toolchain. It is a promise the operator
+  keeps manually — nothing validates it.
+- When the two drift, actions schedule and execute normally, then fail inside the wrong userspace.
+  The Bazel-visible error is a dynamic loader failure, not a build error: `version 'GLIBC_x.y' not
+  found`, `cannot open shared object file`, `cannot execute binary file`, a missing ELF interpreter,
+  or a missing interpreter such as `/usr/bin/env python3`.
+- Hermetic toolchains sharpen this. When Bazel stages a toolchain into the action input tree (the
+  failing executable path is under `external/`, e.g. `external/llvm_toolchain_llvm/bin/clang`), that
+  binary comes from the repository's toolchain pin, not the image. Bumping such a pin can raise the
+  binary's libc floor above what the worker image provides. The toolchain is then *newer* than the
+  execution environment, and the image is the stale side.
+- `dockerPrivileged`, `dockerNetwork`, and `dockerAddCapabilities` are likewise inert matching keys.
+  Real pod privileges come from the worker Deployment's `securityContext`.
+
+Base image to glibc, for judging whether a required symbol version can possibly resolve:
+
+| Base image | glibc |
+|------------|-------|
+| Ubuntu 20.04 | 2.31 |
+| Ubuntu 22.04 | 2.35 |
+| Ubuntu 24.04 | 2.39 |
+| Debian 11 bullseye | 2.31 |
+| Debian 12 bookworm | 2.36 |
+| Debian 13 trixie | 2.41 |
+
+Hermetiq MCP does not currently expose runner container images; they live in worker Deployment pod
+specs, and `get_buildbarn_config` returns component jsonnet only. Treat the runner image as an
+operator-supplied fact and label it as such.
+
+### Deployment Configuration Values
+
+Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
+message limits, worker concurrency) drift per deployment and per release — do not quote
+remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (a file index and secret scan only,
+not geometry) without a store filter, followed by `get_buildbarn_config` (raw jsonnet). Both return only
+ConfigMaps an installed Buildbarn workload mounts or reads unless you pass `includeUnmounted=true`;
+check `data.scope`, `data.scopeReason`, and each entry's `mounted` field. Take the CAS/AC/ISCC/FSAC
+mapping from `data.configurations[].stores` and the `data.configurations[].fields` behind it rather
+than from filenames, then correlate with
+`get_storage_health` / `get_worker_fleet_health` / `get_scheduler_health` before recommending
+changes.
 
 ### VictoriaMetrics Recording Rules
 
-Hermetiq creates 50+ recording rules for Buildbarn metrics:
+Hermetiq ships 50+ recording rules for Buildbarn metrics, named
+`<label_list>:<metric>:<aggregation>` — e.g.
+`outcome_storage_type:buildbarn_blobstore_hashing_key_location_map_put_iterations_count:irate1m`.
 
 **Storage rules**:
-- `bb:blobstore_blob_access_operations_started` — Operation count by type and backend
-- `bb:blobstore_blob_access_operations_duration_seconds_bucket` — Latency distribution
-- `bb:blobstore_local_blob_access_key_location_map_*` — Hash table health
-- `bb:blobstore_local_blob_access_old_current_new_*` — Block insertion timing
+- `backend_type_kubernetes_service_operation_storage_type:buildbarn_blobstore_blob_access_operations_started:irate1m` — operation rates by type and backend
+- `backend_type_kubernetes_service_le_operation_storage_type:buildbarn_blobstore_blob_access_operations_duration_seconds_bucket:irate1m` — latency distribution
+- `storage_type:buildbarn_blobstore_hashing_key_location_map_put_too_many_iterations:irate1m` and `...get_too_many_attempts:irate1m` — key-location-map saturation (any sustained nonzero rate = undersized map)
+- `kubernetes_shard_storage_type:buildbarn_blobstore_old_current_new_location_blob_map_last_removed_old_block_insertion_time_seconds:min` — worst-case retention per shard (the eviction-age signal behind get_storage_health)
 
 **Scheduler rules**:
-- `bb:scheduler_in_memory_build_queue_tasks_*` — Queue depth (queued/executing/completed)
-- `bb:scheduler_in_memory_build_queue_tasks_executing_duration_seconds_*` — Execution timing
-- `bb:scheduler_in_memory_build_queue_tasks_executing_retries_*` — Retry distribution
+- `instance_name_prefix_platform_size_class:buildbarn_builder_in_memory_build_queue_tasks_queued:sum` / `:executing:sum` / `:completed:sum` — queue depth by platform and size class
+- `instance_name_prefix_le_platform_size_class:buildbarn_builder_in_memory_build_queue_tasks_queued_duration_seconds_bucket:irate1m` — queue wait distribution
 
 **Worker rules**:
-- `bb:worker_virtual_execution_duration_seconds_*` — Action execution timing
-- `bb:worker_posix_resource_usage_*` — CPU, memory, I/O resource metrics
-- `bb:worker_file_pool_*` — Temp file pool statistics
-- `bb:worker_input_root_population_*` — Input staging timing
+- `kubernetes_service_le_stage:buildbarn_builder_build_executor_duration_seconds_bucket:irate1m` — execution stage timing
+- `kubernetes_service_le:buildbarn_builder_build_executor_posix_*` — CPU, memory, I/O resource distributions
+- `kubernetes_service_le_operation:buildbarn_builder_build_executor_file_pool_operations_*` — temp file pool statistics
 
 **Service mesh rules**:
-- `bb:grpc_server_handled_total` / `bb:grpc_client_handled_total` — Request rates
-- `bb:grpc_server_handling_seconds_bucket` — Latency distribution
-- `bb:grpc_server_msg_sent_total` / `bb:grpc_server_msg_received_total` — Message rates
+- `grpc_code_grpc_method_grpc_service_kubernetes_service:grpc_server_handled:irate1m` / `...:grpc_client_handled:irate1m` — request and error rates
+- `grpc_method_grpc_service_kubernetes_service_le:grpc_server_handling_seconds_bucket:irate1m` — latency distribution
 
 ---

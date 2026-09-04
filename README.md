@@ -33,9 +33,19 @@ The plugin configures the MCP server automatically. On first use you'll authenti
 
 Authentication uses OAuth2 Dynamic Client Registration via [Stytch](https://stytch.com/docs/connected-apps/guides/remote-mcp-servers). If you hit auth errors, re-authenticate with `/mcp` and follow the prompts.
 
+### Self-hosted / on-prem
+
+The plugin defaults to Hermetiq Cloud (`https://mcp.cloud-usc1.hermetiq.io`). If you run Hermetiq in your own infrastructure, set `HERMETIQ_MCP_URL` to your deployment's MCP endpoint before launching Claude Code:
+
+```bash
+export HERMETIQ_MCP_URL=https://mcp.hermetiq.your-domain.example
+```
+
+The plugin picks this up automatically; no edits to `plugin.json` are needed.
+
 ### Manual MCP server setup
 
-To configure the MCP server without the plugin, add this to your Claude Code MCP settings:
+To configure the MCP server without the plugin, add this to your Claude Code MCP settings (swap the URL for your on-prem endpoint if applicable):
 
 ```json
 {
@@ -66,6 +76,34 @@ Show me cache miss trends for the last 7 days
 Which targets are most expensive to execute remotely?
 ```
 
+### Canonical MCP workflow examples
+
+The plugin follows the official Hermetiq MCP catalog returned by `tools/list`.
+Tool names are lower snake case; generated protobuf names and old PascalCase
+aliases are not supported.
+
+| User request | Expected canonical sequence |
+|---|---|
+| "Which Hermetiq project should we inspect?" | `list_my_projects` |
+| "This opaque build URL is slow" | `resolve_build_or_invocation` → `get_build_details` → `get_invocation_insights` |
+| "Analyze this known invocation" | `analyze_invocation` prompt: `get_invocation(includeCommandLine=true)` → `get_invocation_insights` → `summarize_cache_events` when available; when remote execution is enabled, check `get_project.data.completedActionLogEnabled`, use `analyze_remote_execution` → `get_build_parallelism(bucketSeconds=5)` only when action logging is on, compare only executing remote-action concurrency with a complete last-wins numeric `--jobs`, treat the padded/shared `get_scheduler_health` window as corroboration rather than worker slots or replicas, require `get_worker_scaling_timeline`'s time-aligned desired/available/ready series when listed before claiming autoscaler delay, and follow `available_separately` with same-window `list_buildbarn_events` without inferring causality from timestamp alignment |
+| "Why did cache misses increase in this invocation?" | `group_cache_events` with `hit="miss"` → `find_cache_events` only when groups exist |
+| "Why did these actions fail?" | `find_actions` with `result="failed"` → `get_action_execution` for returned action IDs |
+| "Is Buildbarn healthy?" | `summarize_infrastructure_health` with `timeRange="1h"`, then a component tool only when the summary identifies an anomaly |
+| "Audit Buildbarn storage configuration" | `analyze_buildbarn_storage` without a store filter → `get_buildbarn_config` for discovered files; identify CAS/AC/ISCC/FSAC from configuration content before applying a store focus, then use `get_storage_health` only as corroborating runtime telemetry |
+
+Project scope comes from the server-resolved default or the user's sticky
+`select_project` preference; analytics tools do not accept a model-supplied
+project override. The skill uses the current project without prompting and
+switches only when the user explicitly requests it. Optional capabilities are
+absent from `tools/list` when unavailable, and the skill will say so instead of
+substituting unrelated evidence.
+
+ConfigSet changes require a separate host-visible confirmation immediately
+before `import_config_map_yaml`, `save_config_set`, or
+`create_config_set_pull_request`. The skill never infers confirmation or retries
+an ambiguous mutation blindly.
+
 ## Install in Claude Desktop
 
 ### 1. Add the MCP server
@@ -75,6 +113,8 @@ Go to **Settings > Connectors** and add:
 ```
 https://mcp.cloud-usc1.hermetiq.io
 ```
+
+> Self-hosted? Use your on-prem MCP endpoint instead (e.g. `https://mcp.hermetiq.your-domain.example`).
 
 ### 2. Package and upload the skill
 
@@ -105,6 +145,8 @@ Go to **Settings > Capabilities** and toggle on **Code execution and file creati
 ```bash
 codex mcp add hermetiq --url https://mcp.cloud-usc1.hermetiq.io
 ```
+
+> Self-hosted? Replace the URL with your on-prem MCP endpoint (e.g. `https://mcp.hermetiq.your-domain.example`).
 
 Verify with `codex mcp list` or `codex mcp get hermetiq`.
 
@@ -148,4 +190,33 @@ Show cache miss reasons by mnemonic for my failing builds
 | `references/build-configuration.md` | Configuration drift, hermeticity, stamping, toolchain, and flag audit guidance |
 | `references/bazel-optimization.md` | Common Bazel flags and build graph anti-patterns |
 | `references/infrastructure-tuning.md` | Buildbarn storage, worker, scheduler, and scaling guidance |
-| `evals/evals.json` | Basic skill behavior eval prompts |
+| `evals/evals.json` | Skill behavior suite covering canonical selection, response-contract semantics, errors, disabled capabilities, and mutation safety |
+| `evals/canonical-mcp-catalog.json` | Release snapshot of canonical tools plus explicit prompt/resource/external-tool allowlists |
+| `scripts/validate-mcp-catalog.py` | Mechanical catalog-to-skill drift validator; pass `--server-catalog` to compare with the cloud-native fixture |
+
+## Developer validation
+
+Validate the skill, references, README, and eval sequences against the checked-in
+catalog and the authoritative server fixture:
+
+```bash
+python3 scripts/validate-mcp-catalog.py \
+  --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json
+python3 -m unittest scripts/test_validate_mcp_catalog.py scripts/test_run_mcp_evals.py -v
+```
+
+Run the real Claude/official-MCP canary suite with the API key and fixture IDs in
+the environment. In addition to tool selection, the suite requires supported
+response claims and rejects forbidden legacy fields or over-specific diagnoses.
+The runner writes one raw/scored JSON artifact per case plus an aggregate
+`run.json`; it never writes the API key:
+
+```bash
+ANTHROPIC_API_KEY=... \
+BUILD_ID=... INVOCATION_ID=... FAILURE_INVOCATION_ID=... \
+REMOTE_EXEC_INVOCATION_ID=... LOCAL_INVOCATION_ID=... \
+CONFIG_SET_NAME=... REQUEST_ID=... \
+python3 scripts/run-mcp-evals.py \
+  --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json \
+  --output /tmp/hermetiq-skill-eval
+```
