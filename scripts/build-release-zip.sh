@@ -45,8 +45,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SKILLS_ROOT="$REPO_ROOT/plugins/hermetiq/skills"
-TMP_ROOT="$(realpath -m -- "$REPO_ROOT/tmp")"
-STAGE_DIR="$(realpath -m -- "$TMP_ROOT/release-$VERSION")"
+TMP_ROOT="$REPO_ROOT/tmp"
+STAGE_DIR="$TMP_ROOT/release-$VERSION"
 SUPPORTED_SKILLS=("hermetiq" "on-prem-gke-install")
 
 for skill in "${SUPPORTED_SKILLS[@]}"; do
@@ -56,10 +56,22 @@ for skill in "${SUPPORTED_SKILLS[@]}"; do
   fi
 done
 
-# Resolve symlinks and normalization before deletion, then require the stage
-# directory to be an immediate child of this checkout's canonical tmp root.
-if [[ "$(dirname -- "$STAGE_DIR")" != "$TMP_ROOT" ]]; then
-  echo "error: refusing to recreate stage path outside $TMP_ROOT: $STAGE_DIR" >&2
+# Refuse symlinked deletion roots, then verify the normalized stage path is the
+# expected immediate child of this checkout's canonical tmp root. Delete the
+# literal checked path, never the resolved target of a symlink.
+if [[ -L "$TMP_ROOT" ]]; then
+  echo "error: refusing to use path because tmp root is a symlink: $TMP_ROOT" >&2
+  exit 1
+fi
+if [[ -L "$STAGE_DIR" ]]; then
+  echo "error: refusing to recreate path because stage path is a symlink: $STAGE_DIR" >&2
+  exit 1
+fi
+CANONICAL_TMP_ROOT="$(realpath -m -- "$TMP_ROOT")"
+CANONICAL_STAGE_DIR="$(realpath -m -- "$STAGE_DIR")"
+EXPECTED_CANONICAL_STAGE="$CANONICAL_TMP_ROOT/release-$VERSION"
+if [[ "$CANONICAL_STAGE_DIR" != "$EXPECTED_CANONICAL_STAGE" ]]; then
+  echo "error: refusing to recreate stage path outside $CANONICAL_TMP_ROOT: $CANONICAL_STAGE_DIR" >&2
   exit 1
 fi
 if [[ -e "$STAGE_DIR" ]]; then

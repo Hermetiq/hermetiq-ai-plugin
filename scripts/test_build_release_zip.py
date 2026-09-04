@@ -101,7 +101,65 @@ class ReleaseZipTest(unittest.TestCase):
             )
 
             self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("stage path outside", completed.stderr)
+            self.assertIn("stage path is a symlink", completed.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_rejects_stage_symlink_that_resolves_inside_repo_tmp(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hermetiq-release-test-") as directory:
+            root = Path(directory) / "repository"
+            shutil.copytree(REPO_ROOT / "plugins", root / "plugins")
+            shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
+            tmp_root = root / "tmp"
+            tmp_root.mkdir()
+            sibling_stage = tmp_root / "sibling-stage"
+            sibling_stage.mkdir()
+            sentinel = sibling_stage / "must-survive.txt"
+            sentinel.write_text("keep me\n", encoding="utf-8")
+            (tmp_root / "release-v9.9.9-test").symlink_to(
+                sibling_stage, target_is_directory=True
+            )
+
+            completed = subprocess.run(
+                [
+                    str(root / "scripts" / "build-release-zip.sh"),
+                    "v9.9.9-test",
+                ],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("stage path is a symlink", completed.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_rejects_symlinked_repo_tmp_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="hermetiq-release-test-") as directory:
+            sandbox = Path(directory)
+            root = sandbox / "repository"
+            shutil.copytree(REPO_ROOT / "plugins", root / "plugins")
+            shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
+            outside_tmp = sandbox / "outside-tmp"
+            stage = outside_tmp / "release-v9.9.9-test"
+            stage.mkdir(parents=True)
+            sentinel = stage / "must-survive.txt"
+            sentinel.write_text("keep me\n", encoding="utf-8")
+            (root / "tmp").symlink_to(outside_tmp, target_is_directory=True)
+
+            completed = subprocess.run(
+                [
+                    str(root / "scripts" / "build-release-zip.sh"),
+                    "v9.9.9-test",
+                ],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("tmp root is a symlink", completed.stderr)
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
 
 
