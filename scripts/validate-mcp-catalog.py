@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -12,9 +13,10 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILL_ROOT = REPO_ROOT / "plugins" / "hermetiq" / "skills" / "hermetiq"
-DEFAULT_CATALOG = SKILL_ROOT / "evals" / "canonical-mcp-catalog.json"
-EVALS = SKILL_ROOT / "evals" / "evals.json"
+SKILLS_ROOT = REPO_ROOT / "plugins" / "hermetiq" / "skills"
+CORE_SKILL_ROOT = SKILLS_ROOT / "hermetiq"
+DEFAULT_CATALOG = CORE_SKILL_ROOT / "evals" / "canonical-mcp-catalog.json"
+EVALS = CORE_SKILL_ROOT / "evals" / "evals.json"
 
 PUBLIC_TOOL_PREFIXES = {
     "analyze",
@@ -40,6 +42,7 @@ PASCAL_ALIAS = re.compile(
     r"[A-Z][A-Za-z0-9]*\b|\bQuickstart\b"
 )
 NON_TOOL_TECHNICAL_NAMES = {"FindMissing", "FindMissingBlobs"}
+RETIRED_TOOL_NAMES = {"show_trends_dashboard"}
 CODE_SPAN = re.compile(r"`([^`\n]+)`")
 LEADING_IDENTIFIER = re.compile(r"^([a-z][a-z0-9_]+)(?:\(|\s|$)")
 
@@ -51,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         "--server-catalog",
         type=Path,
         help="cloud-native mcpv2 catalog fixture; also validates exact set parity and eval arguments",
+    )
+    parser.add_argument(
+        "--server-provenance",
+        type=Path,
+        help="source revision and SHA-256 manifest for the server catalog fixture",
     )
     return parser.parse_args()
 
@@ -66,8 +74,9 @@ def name_set(entries: list[Any], key: str = "name") -> set[str]:
     return {entry if isinstance(entry, str) else entry[key] for entry in entries}
 
 
-def documentation_files() -> list[Path]:
-    return [REPO_ROOT / "README.md", SKILL_ROOT / "SKILL.md", *sorted((SKILL_ROOT / "references").glob("*.md"))]
+def distributable_text_files() -> list[Path]:
+    files = [path for path in SKILLS_ROOT.rglob("*") if path.is_file()]
+    return [REPO_ROOT / "README.md", *sorted(files)]
 
 
 def validate_sorted_unique(values: list[str], label: str, errors: list[str]) -> None:
@@ -80,8 +89,13 @@ def validate_docs(catalog: dict[str, Any], errors: list[str]) -> None:
     allowlist = catalog["allowlist"]
     allowed_non_tools = set(allowlist["prompts"]) | set(allowlist["resources"]) | set(allowlist["externalMcpTools"])
 
-    for path in [*documentation_files(), EVALS]:
-        text = path.read_text(encoding="utf-8")
+    for path in distributable_text_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Packaged skills may eventually include binary assets. Only text
+            # can contain model-visible MCP names that this validator parses.
+            continue
         relative = path.relative_to(REPO_ROOT)
         for match in GENERATED_NAME.finditer(text):
             errors.append(f"{relative}: generated MCP name is forbidden: {match.group(0)}")
@@ -92,6 +106,9 @@ def validate_docs(catalog: dict[str, Any], errors: list[str]) -> None:
 
         for code in CODE_SPAN.findall(text):
             if code in allowed_non_tools:
+                continue
+            if code in RETIRED_TOOL_NAMES:
+                errors.append(f"{relative}: retired MCP tool is forbidden: {code}")
                 continue
             identifier = LEADING_IDENTIFIER.match(code)
             if identifier is None:
@@ -223,11 +240,29 @@ def validate_server_parity(catalog: dict[str, Any], server: dict[str, Any], erro
         )
 
 
+def validate_server_provenance(
+    catalog: dict[str, Any], server_path: Path, provenance: dict[str, Any], errors: list[str]
+) -> None:
+    actual_sha256 = hashlib.sha256(server_path.read_bytes()).hexdigest()
+    if provenance.get("sha256") != actual_sha256:
+        errors.append(
+            "server catalog checksum drift: "
+            f"manifest={provenance.get('sha256')} actual={actual_sha256}"
+        )
+    for field in ("source", "sourceRevision"):
+        if provenance.get(field) != catalog.get(field):
+            errors.append(
+                f"server catalog provenance drift for {field}: "
+                f"manifest={provenance.get(field)!r} plugin={catalog.get(field)!r}"
+            )
+
+
 def main() -> int:
     args = parse_args()
     try:
         catalog = load_json(args.catalog)
         server = load_json(args.server_catalog) if args.server_catalog else None
+        provenance = load_json(args.server_provenance) if args.server_provenance else None
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2
@@ -239,6 +274,11 @@ def main() -> int:
     validate_docs(catalog, errors)
     if server is not None:
         validate_server_parity(catalog, server, errors)
+    if provenance is not None:
+        if args.server_catalog is None:
+            errors.append("--server-provenance requires --server-catalog")
+        else:
+            validate_server_provenance(catalog, args.server_catalog, provenance, errors)
     validate_eval_suite(catalog, server, errors)
 
     if errors:

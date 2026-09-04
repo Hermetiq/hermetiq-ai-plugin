@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
+  "sourceRevision": "c27c257f223d338216e0d05d6683ab5a36f242f6",
   "server": "hermetiq-mcp-v2",
   "serverVersion": "0.18.0",
   "tools": [

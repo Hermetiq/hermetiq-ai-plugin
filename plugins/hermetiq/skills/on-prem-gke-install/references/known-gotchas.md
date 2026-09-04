@@ -101,9 +101,9 @@ this — kept here so you don't repeat them):
 2. **"The scheduler isn't dispatching work."** If, after raising
    `--remote_timeout`, you see an action stuck with `0 running` for many
    minutes, and `kubectl top pod` shows near-zero CPU on every worker while
-   the Hermetiq MCP server's `GetSchedulerQueueHealth` shows
+   the Hermetiq MCP server's `get_scheduler_health` shows
    `queue_depth: 0, executing: 0` — this looks exactly like a stuck
-   dispatcher, but `GetSchedulerQueueHealth` tracks the `Execute` queue
+   dispatcher, but `get_scheduler_health` tracks the `Execute` queue
    only. A stalled `ByteStream.Write` **never touches the scheduler at
    all**, so this metric is uninformative for that failure mode. Don't
    read "zero queue depth" as "nothing is happening" unless you've confirmed
@@ -118,7 +118,7 @@ this — kept here so you don't repeat them):
    blob size as plain text:
    `{instance}/uploads/{uuid}/blobs/{sha256}/{size-in-bytes}`. If you see a
    multi-hundred-MB blob, that's your answer.
-3. Only reach for `kubectl top pod`/`GetSchedulerQueueHealth` if the stalled
+3. Only reach for `kubectl top pod`/`get_scheduler_health` if the stalled
    RPC is confirmed to be `Execute`, not `ByteStream.Write`/`Read`.
 
 **One real, separate fix still worth keeping:** the `buildbarn` chart's
@@ -224,7 +224,7 @@ Older examples set `bootstrap.namespaceDashboardUrl` to
 `https://grafana.<domain>/d/hermetiq`, but the chart's shipped dashboard UID is
 `hermetiq-demo`. The current `hermetiq-k8s/custom-values/hermetiq-values.yaml`
 uses `/d/hermetiq-demo`; preserve that value when adapting it. A stale override
-still produces a Grafana 404 the first time a user (or the web UI's Quickstart
+still produces a Grafana 404 the first time a user (or the web UI's quickstart
 page) clicks through. Verify the dashboard UID directly against Grafana:
 
 ```bash

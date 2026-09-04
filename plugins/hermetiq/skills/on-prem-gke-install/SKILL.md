@@ -182,6 +182,13 @@ MCP Dynamic Client Registration (DCR) configuration:
    connection to domain level. MCP clients such as Claude create their own
    third-party application; do not reuse the dashboard SSO client secret.
 
+For a non-interactive command-line smoke test, create a separate **MCP smoke
+M2M app** and grant that client the MCP API/audience explicitly. Do not reuse
+the Bazel BEP/RBE M2M app by default: granting it the MCP audience expands the
+credentials' trust boundary. If an operator deliberately accepts that
+expansion, they must still add an explicit client grant for the MCP audience.
+Interactive clients should continue to use the supported DCR flow.
+
 **Critical: MCP URL must be byte-for-byte identical** (including the
 trailing slash) across all of:
 - The Auth0 API identifier/audience
@@ -198,7 +205,7 @@ an API — you (or the tenant admin) must also create a **Client Grant**
 (Applications → APIs tab → Add API, or `POST /api/v2/client-grants`) for each
 distinct Bazel audience. MCP DCR clients instead use the runbook's default
 `third_party_clients` grant.
-Missing this produces:
+Missing an explicit client grant for any M2M audience produces:
 ```
 access_denied: Client "..." is not authorized to access resource server "...".
 You need to create a "client-grant" associated to this API.
@@ -259,32 +266,70 @@ separate HTTP/2 stream cap. See gotcha #3 for diagnosis order and use the
 
 **MCP — verify both directions:**
 
+The raw `curl` flow below uses a dedicated M2M application created for smoke
+testing. In Auth0, authorize that application for the MCP API whose identifier
+is exactly `https://mcp.<namespace>.<your-domain>/`. Keep the Bazel BEP/RBE M2M
+application separate unless the operator deliberately accepts the additional
+MCP trust described in step 5. For a user-interactive check, use Claude,
+Codex, or another supported client through the DCR flow instead of extracting
+its token.
+
+Create the dedicated grant before requesting a token (or use Applications →
+APIs → Authorize in the Auth0 dashboard):
+
+```bash
+auth0 api post client-grants --data '{
+  "client_id":"<mcp-smoke-client-id>",
+  "audience":"https://mcp.<namespace>.<your-domain>/",
+  "scope":[] }'
+```
+
 ```bash
 # Unauthenticated should fail:
 curl -s -o /dev/null -w "%{http_code}\n" https://mcp.<namespace>.<your-domain>/
 # expect 401
 
-# Authenticated should succeed and return real data:
+# Authenticated should succeed and return real data. These are credentials for
+# the dedicated MCP smoke M2M app, not the Bazel BEP/RBE client:
+MCP_URL=https://mcp.<namespace>.<your-domain>/
+MCP_PROTOCOL_VERSION=2025-11-25
 TOKEN=$(curl -s -X POST "https://<tenant>.auth0.com/oauth/token" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"<m2m-client-id>","client_secret":"<m2m-client-secret>","audience":"https://mcp.<namespace>.<your-domain>/","grant_type":"client_credentials"}' \
-  | jq -r '.access_token')
+  -d '{"client_id":"<mcp-smoke-client-id>","client_secret":"<mcp-smoke-client-secret>","audience":"https://mcp.<namespace>.<your-domain>/","grant_type":"client_credentials"}' \
+  | jq -er '.access_token')
 
-curl -s -X POST https://mcp.<namespace>.<your-domain>/ \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
-# capture the mcp-session-id response header, then:
+mcp_request() {
+  curl -fsS -X POST "$MCP_URL" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Mcp-Protocol-Version: $MCP_PROTOCOL_VERSION" \
+    --data "$1"
+}
 
-curl -s -X POST https://mcp.<namespace>.<your-domain>/ \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" -H "mcp-session-id: <session-id>" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"GetInfraHealthSummary","arguments":{}}}'
+# Initialize the stateless Streamable HTTP connection.
+mcp_request \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"on-prem-smoke","version":"1.0"}}}' \
+  | jq -e '.result.protocolVersion == "2025-11-25"'
+
+# Discover the live catalog and fail before calling if the feature-gated tool
+# is unavailable in this deployment.
+TOOLS=$(mcp_request \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+jq -e '.result.tools | any(.name == "summarize_infrastructure_health")' \
+  <<<"$TOOLS"
+
+# Call only the canonical name confirmed by tools/list.
+mcp_request \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"summarize_infrastructure_health","arguments":{"timeRange":"1h"}}}' \
+  | jq .
 ```
 
 A real "useful tool call" means the response has actual field values (health
 statuses, queue depths, latencies), not an empty/stub payload — don't stop at
-"got a 200," check the content.
+"got a 200," check the content. If `summarize_infrastructure_health` is absent
+from `tools/list`, verify that infrastructure metrics are configured and
+enabled; do not substitute an unlisted or legacy tool name.
 
 **VictoriaMetrics — verify more than scrape health:**
 
