@@ -19,12 +19,12 @@ A [Hermetiq](https://dashboard.hermetiq.io) account with at least one project re
 
 ## Install in Claude Code
 
-```bash
-# Add the Hermetiq marketplace
-/plugin marketplace add Hermetiq/hermetiq-ai-plugin
+Paste these slash commands inside Claude Code:
 
-# Install the plugin
+```text
+/plugin marketplace add Hermetiq/hermetiq-ai-plugin
 /plugin install hermetiq@hermetiq
+/reload-plugins
 ```
 
 > The plugin marketplace is a Claude Code (CLI) feature, not Claude Desktop.
