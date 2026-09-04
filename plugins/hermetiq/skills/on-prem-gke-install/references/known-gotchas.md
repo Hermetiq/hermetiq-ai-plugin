@@ -1,9 +1,12 @@
 # Known Gotchas — On-Prem GKE Install
 
-Found during a from-scratch install test of `on-prem-helm` + `hermetiq-helm-gke`
-unreleased PR branches into a new namespace on a shared GKE test cluster. Read
-this before debugging an install issue — several of these look like real bugs
-on first encounter but have a known cause and fix.
+Found during a from-scratch install test of the Helm charts and GKE install
+guide that are now consolidated in `Hermetiq/hermetiq-k8s`. Read this before
+debugging an install issue — several of these look like real bugs on first
+encounter but have a known cause and fix. Use the current `hermetiq-k8s`
+README, chart references, starter values, examples, and runbooks as the
+canonical instructions; notes below that describe an older documentation gap
+are retained because the failure mode still helps diagnose older releases.
 
 ## 1. MCP URL must be byte-for-byte identical everywhere (including trailing slash)
 
@@ -22,21 +25,23 @@ scheme/host/path mismatch error. If MCP auth fails and the token itself looks
 fine (right audience, not expired, valid signature), check this first before
 assuming a deeper auth bug.
 
-## 2. Two (or three) separate Auth0 applications are required, not one
+## 2. Separate interactive-login and machine clients; configure MCP DCR
 
 The natural reading of "set up Auth0/OIDC for Hermetiq" is one application.
-In practice:
+In practice, provision two applications and configure MCP DCR at the tenant
+level:
 
 - **SSO app** (Regular Web Application, Authorization Code flow) — covers
   dashboard, Grafana, and Browser login via `oauth2-proxy`.
-- **MCP M2M app** (Machine to Machine, Client Credentials flow) — covers MCP
-  bearer-token auth, with its own registered API/audience
-  (`https://mcp.<domain>/`).
-- **RBE M2M app** — if you're testing authenticated RBE (not just
-  `executeAuthorizer.mode: allow` for a quick smoke test), `publisher.jwks.audience`
-  needs a third, independent Auth0 API registration. The example values'
-  default audience (`https://bep.<domain>`) is easy to mistake for something
-  already covered by the SSO app — it isn't.
+- **Bazel M2M app** (Machine to Machine, Client Credentials flow) — covers
+  BEP and authenticated cache/remote-execution traffic. The
+  `publisher.jwks.audience` and `frontend.jwks.audience` settings may share one
+  Auth0 API/audience initially; use separate APIs or clients only when the
+  environment needs independent revocation or policy.
+- **MCP DCR clients** — register themselves as third-party applications. The
+  tenant needs DCR enabled, an MCP API whose identifier exactly matches the
+  MCP resource URL, a default grant for `third_party_clients`, and a
+  domain-level login connection. Follow `docs/mcp-auth0-runbook.md`.
 
 Creating an M2M application does **not** automatically grant it access to an
 API. You (or a tenant admin) must separately create a **Client Grant**:
@@ -117,7 +122,7 @@ this — kept here so you don't repeat them):
    RPC is confirmed to be `Execute`, not `ByteStream.Write`/`Read`.
 
 **One real, separate fix still worth keeping:** the `buildbarn` chart's
-`gateway.grpcRoutes.frontendBbCloudGrpc.backendTrafficPolicy` sets
+`gateway.grpcRoutes.frontend.backendTrafficPolicy` sets
 `maxStreamDuration: "0s"` by default (disabling Envoy Gateway's own max
 HTTP/2 stream duration cap) as of the "Option to set maxStreamDuration"
 commit. This is real and independently necessary — it's just not
@@ -201,30 +206,26 @@ first install and poll pod status separately.
 
 ## 8. Chart-shipped dashboards can hide a hardcoded namespace default
 
-At least one chart-shipped Grafana dashboard (`Hermetiq Demo Dashboard`,
-uid `hermetiq-demo`) defines a template variable of `"type": "constant"` with
-`"hide": 2` (fully hidden from the dashboard UI) whose value is hardcoded to
-a specific namespace name rather than templated from the release namespace.
-Panels depending on it silently render empty in any other namespace — or, on
-a cluster where a namespace with that hardcoded name actually exists, could
-show that namespace's data instead of the current release's.
+Older versions of the chart-shipped `Hermetiq Demo Dashboard` (uid
+`hermetiq-demo`) defined a hidden constant namespace variable whose value was
+hardcoded instead of templated from the release namespace. Panels depending on
+it silently rendered empty in another namespace, or could show another
+environment's data on a shared cluster. The current `hermetiq-k8s` chart
+replaces this with `__HERMETIQ_NAMESPACE__` during rendering.
 
-Because the variable is hidden, a customer has no UI-visible way to notice or
-fix this themselves. Check every chart-shipped dashboard's template variables
-for this pattern, not just the one it was found in — search the dashboard
-JSON for `"type": "constant"` combined with `"hide": 2` and confirm the value
-isn't a leftover hardcoded namespace.
+Because such variables are hidden, a customer has no UI-visible way to notice
+the problem. For older releases or custom dashboards, search dashboard JSON
+for `"type": "constant"` combined with `"hide": 2` and confirm the value is
+templated or intentionally fixed.
 
 ## 9. README dashboard-URL examples can point at a UID the chart doesn't ship
 
-The README's example `bootstrap.namespaceDashboardUrl` value
-(`https://grafana.<domain>/d/hermetiq`) and the matching example in
-`custom-values/hermetiq-values.yaml` both reference dashboard UID `hermetiq`.
-The chart's actual shipped dashboard UID is `hermetiq-demo`. Following the
-README's example literally produces a Grafana 404 the first time a user (or
-the web-ui's Quickstart page, which surfaces this URL) clicks through. Verify
-the dashboard UID directly against the Grafana instance rather than trusting
-the doc example:
+Older examples set `bootstrap.namespaceDashboardUrl` to
+`https://grafana.<domain>/d/hermetiq`, but the chart's shipped dashboard UID is
+`hermetiq-demo`. The current `hermetiq-k8s/custom-values/hermetiq-values.yaml`
+uses `/d/hermetiq-demo`; preserve that value when adapting it. A stale override
+still produces a Grafana 404 the first time a user (or the web UI's Quickstart
+page) clicks through. Verify the dashboard UID directly against Grafana:
 
 ```bash
 curl -u admin:<pw> https://grafana.<domain>/api/search | jq -r '.[].uid'
@@ -309,18 +310,13 @@ were committed to git either):
   reapplying the `Certificate` object regenerates it automatically via the
   existing `ClusterIssuer`.
 
-## 14. The README documents BEP's server side, not the Bazel client side
+## 14. Credential helpers are identity-provider-specific
 
-"Authenticating BEP event requests from Bazel using JWKS" documents
-`publisher.jwks.url/issuer/audience` (what the server will accept) in full,
-but only says "your Bazel credential helper script attaches to BEP event
-requests" — as if you already have one. It never showed the
-`--credential_helper` bazelrc syntax, the JSON request/response protocol the
-script must implement, or a working example. Fixed in
-[hermetiq-helm-gke#15](https://github.com/Hermetiq/hermetiq-helm-gke/pull/15),
-which adds a working `docs/bep-credential-helper.sh` and the missing README
-section. Two things worth knowing if you write your own before that PR
-merges:
+The current `hermetiq-k8s` examples show the `--credential_helper` flags for
+both BEP and Buildbarn hosts, but the helper executable itself remains
+identity-provider-specific. Start with `examples/bazel-examples.md` and obtain
+the helper from the platform administrator. Two things worth knowing if you
+must write one:
 
 **The stdin gotcha (a real bug, not just a documentation gap):** Bazel
 writes the credential request to the helper's stdin *without* a trailing

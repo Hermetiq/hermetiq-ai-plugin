@@ -3,7 +3,7 @@ name: on-prem-gke-install
 description: >
   Guide for installing Hermetiq + Buildbarn on-prem Helm charts into a GKE
   cluster using Gateway API. Use when a user wants to test an unreleased
-  on-prem-helm / hermetiq-helm-gke PR branch, stand up a new test namespace,
+  hermetiq-k8s PR branch, stand up a new test namespace,
   configure Auth0/OIDC (including MCP auth), validate rendered Helm output,
   run RBE examples, or debug a failed install. Encodes lessons learned from a
   from-scratch install test in the `nick` namespace on the `test-uss1`
@@ -15,7 +15,9 @@ argument-hint: "[namespace name], [PR number(s)], or a specific install step to 
 
 You are guiding a user through installing the Hermetiq + Buildbarn on-prem
 Helm charts into a GKE cluster, most likely to test an unreleased PR branch
-of `on-prem-helm` and/or `hermetiq-helm-gke`. Be concrete: give exact
+of `Hermetiq/hermetiq-k8s`. That repository is the single source for the
+Hermetiq, Buildbarn, and BB Worker Operator charts, starter values, examples,
+and install/runbook documentation. Be concrete: give exact
 commands, ask for the specific values you need (namespace, domain, PR
 numbers, cluster/project name) rather than assuming a template, and check
 each step's actual output before moving to the next.
@@ -24,37 +26,42 @@ Read `references/known-gotchas.md` early — it documents doc gaps and chart
 quirks discovered during a real from-scratch install test, several of which
 will otherwise cost 30+ minutes of debugging each.
 
-## 1. Clone the right repos and branches
+## 1. Clone the right repo and branch
 
 Charts and install docs are usually **unreleased PR branches** during
 testing, not the `main` branch or an `oci://` release. Use a `git worktree`
 per PR so this doesn't disturb other work on the same clone's `main`:
 
 ```bash
-# Chart source (on-prem-helm)
-cd ~/source/hermetiq/on-prem-helm
+cd ~/source/hermetiq/hermetiq-k8s
 git fetch origin pull/<PR_NUMBER>/head:pr-<PR_NUMBER>
-git worktree add ~/source/hermetiq/on-prem-helm-pr<PR_NUMBER> pr-<PR_NUMBER>
-
-# Install guide (hermetiq-helm-gke)
-cd ~/source/hermetiq/hermetiq-helm-gke
-git fetch origin pull/<PR_NUMBER>/head:pr-<PR_NUMBER>
-git worktree add ~/source/hermetiq/hermetiq-helm-gke-pr<PR_NUMBER> pr-<PR_NUMBER>
+git worktree add ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER> pr-<PR_NUMBER>
 ```
 
-**Every `helm` command in the README will reference `oci://ghcr.io/hermetiq/<chart>`.**
+For a released install, follow the repository README and use the pinned OCI
+charts at `oci://ghcr.io/hermetiq/`. For an unreleased PR, use all three chart
+directories and supporting files from the same worktree so the bundle stays
+internally consistent:
+
+- `charts/hermetiq`
+- `charts/buildbarn`
+- `charts/bb-worker-operator`
+- `custom-values/`, `examples/`, and `docs/`
+
+**The release commands in the README reference `oci://ghcr.io/hermetiq/<chart>`.**
 When testing an unreleased PR, replace that with the local checkout path
 instead — dropping `--version X.Y.Z` — or you'll test the wrong artifact
 entirely:
 
 ```bash
 # Don't do this when testing a PR:
-helm upgrade --install hermetiq oci://ghcr.io/hermetiq/hermetiq --version 0.4.6 ...
+helm upgrade --install hmq oci://ghcr.io/hermetiq/hermetiq --version <VERSION> ...
 
 # Do this instead:
-helm upgrade --install hermetiq \
-  ~/source/hermetiq/on-prem-helm-pr<PR_NUMBER>/charts/hermetiq \
-  --namespace <namespace> --values hermetiq-values.yaml
+helm upgrade --install hmq \
+  ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER>/charts/hermetiq \
+  --namespace <namespace> \
+  --values ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER>/<environment>-custom-values/hermetiq-values.yaml
 ```
 
 ## 2. Prepare the namespace
@@ -108,11 +115,17 @@ expected build duration if using `gateway-httproute-only`.
 
 ## 4. Sanitized Helm values
 
-Start from the chart's own `values.yaml` and the README's example values, not
-by copying another namespace's live values file (defeats the point of a
-from-scratch test, and risks carrying over namespace-specific naming
-collisions — see `references/known-gotchas.md` for the VictoriaMetrics/OTEL
-cluster-scoped-object collisions this caused in a shared-cluster test).
+From the `hermetiq-k8s` worktree, copy `custom-values/` to an
+environment-specific directory such as `<environment>-custom-values/`. The
+repository ignores names ending in `-custom-values`. Edit that copy rather
+than the source examples or another namespace's live values file; copying a
+live install defeats a from-scratch test and risks carrying over naming
+collisions (see `references/known-gotchas.md`).
+
+```bash
+cd ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER>
+cp -R custom-values <environment>-custom-values
+```
 
 Minimum values to set explicitly:
 
@@ -151,26 +164,23 @@ images:
 
 ## 5. Auth0 / OIDC setup
 
-One SSO application plus one M2M application is the minimum; the M2M app
-can (and commonly does, at least initially) cover two conceptually distinct
-audiences at once:
+Follow `docs/mcp-auth0-runbook.md` in the same `hermetiq-k8s` checkout. A
+typical installation needs two pre-provisioned applications plus tenant-level
+MCP Dynamic Client Registration (DCR) configuration:
 
 1. **SSO app** (Regular Web Application) — dashboard/Grafana/Browser login,
    OIDC Authorization Code flow. Needs callback/logout/web-origin URLs for
-   each of the three UIs.
-2. **M2M app** (Machine to Machine, Client Credentials flow) — covers
-   **two separate audiences**, each tied to a different chart setting:
-   - `api.mcpResourceUrl` (MCP bearer-token auth)
-   - `publisher.jwks.audience` (BEP event auth) — commonly reused as
-     `frontend.jwks.audience` (RBE cache/execute auth) too, until you
-     register RBE as its own Auth0 API. This is a legitimate interim
-     state, not a bug — see gotcha #15 for why no custom Auth0 claim is
-     needed to make `requireCanWriteToCache` authorization actually enforce
-     against it.
-   Register each audience as its own Auth0 API, and add a **Client Grant**
-   for the M2M app against every one of them separately (see below) — one
-   registered API does not imply access to another, even under the same
-   M2M application.
+   each enabled UI.
+2. **Bazel M2M app** (Machine to Machine, Client Credentials flow) —
+   authenticated BEP, cache writes, and remote execution. Configure
+   `publisher.jwks.audience` for BEP and `frontend.jwks.audience` for RBE.
+   They may reuse one Auth0 API/audience initially; splitting them is an
+   optional isolation boundary, not an install requirement. See gotcha #15
+   for why `requireCanWriteToCache` needs no custom Auth0 claim.
+3. **MCP DCR tenant setup** — enable DCR, register the MCP URL as an Auth0 API,
+   create a default grant for `third_party_clients`, and promote the login
+   connection to domain level. MCP clients such as Claude create their own
+   third-party application; do not reuse the dashboard SSO client secret.
 
 **Critical: MCP URL must be byte-for-byte identical** (including the
 trailing slash) across all of:
@@ -185,8 +195,9 @@ auth isn't working and everything else looks right, check this first.
 
 Creating an M2M application does **not** automatically authorize it against
 an API — you (or the tenant admin) must also create a **Client Grant**
-(Applications → APIs tab → Add API, or `POST /api/v2/client-grants`) **per
-audience** — the MCP grant doesn't imply a BEP/RBE grant, and vice versa.
+(Applications → APIs tab → Add API, or `POST /api/v2/client-grants`) for each
+distinct Bazel audience. MCP DCR clients instead use the runbook's default
+`third_party_clients` grant.
 Missing this produces:
 ```
 access_denied: Client "..." is not authorized to access resource server "...".
@@ -214,40 +225,35 @@ of trusting the Helm client's timeout as ground truth.
 
 ## 7. Run the RBE examples
 
-Check the chart repo's `examples/` directory — try **every** example, not
-just the ones called out in the main README, and record pass/fail/why for
+Start with `examples/README.md` in `hermetiq-k8s`, then check every linked
+example and record pass/fail/why for
 each in an `examples-results.md`. Some examples need dedicated node
 pools/worker fleets (e.g. `testcontainers`, `testcontainers-sysbox`) that a
 shared test cluster's default `ubuntu22-04` worker pool won't satisfy —
 that's a legitimate "blocked, out of scope" result, not a chart bug, as long
 as node-pool creation was explicitly out of scope for the test.
 
-Before running an example, adapt its `.bazelrc` snippet: examples in the repo
-reference the **cloud** SaaS endpoints
-(`grpcs://lb.bb.cloud-grpc.hermetiq.io`, `bep.cloud-grpc.hermetiq.io`) — for
-an on-prem install these need to point at your Gateway-routed endpoints
-instead (e.g. `grpcs://bb.<namespace>.<your-domain>`).
+Before running an example, replace its `<your-domain>` and
+`$CREDENTIAL_HELPER` placeholders with the values for this installation.
+Confirm that the resulting `bep.<your-domain>`, `bb.<your-domain>`, and
+`dashboard.<your-domain>` hosts match the chart values and live Gateway
+routes.
 
 If either `frontend.jwks.enabled` (RBE) or `publisher.jwks.enabled` (BEP) is
 `true` — i.e. you're testing real auth enforcement, not the `mode: allow`
 bypass — you'll also need a working `--credential_helper` wired to every
 authenticated host (`bep.*` and/or `bb.*`). See gotcha #14 for the working
-example script and a real stdin-handling bug worth avoiding, and gotcha #15
+flags and a real stdin-handling bug worth avoiding, and gotcha #15
 for what `requireCanWriteToCache` authorization actually requires (less than
 it looks like — no custom Auth0 claim needed).
 
-**Formerly-blocking issue, now fixed:** sustained RBE builds (roughly 5-6+
-minutes of continuous remote execution) used to hit a gRPC connection reset
-or hung action even when workers stayed healthy — root cause was Envoy
-Gateway's default max HTTP/2 stream duration killing long-lived RBE
-`Execute`/`ByteStream` streams. Fixed by the `buildbarn` chart defaulting
-`maxStreamDuration: "0s"` on the frontend's `BackendTrafficPolicy`. If you're
-on a chart version old enough to predate this, or you've overridden
-`gateway.grpcRoutes` in your own values without carrying this setting
-forward, see `references/known-gotchas.md` gotcha #3 for the fix and how to
-verify it's actually applied. A large-scale example that reliably exercises
-this path is the `envoy` RBE example below — its full test suite runs well
-past the old failure threshold.
+For sustained RBE builds, size Bazel's `--remote_timeout` for the largest
+single blob transfer; the default 60 seconds is a common cause of apparently
+hung or reset uploads. Also preserve the Buildbarn chart's
+`gateway.grpcRoutes.frontend.backendTrafficPolicy.maxStreamDuration` value of
+`"0s"` when overriding `gateway.grpcRoutes`, so Envoy Gateway does not add a
+separate HTTP/2 stream cap. See gotcha #3 for diagnosis order and use the
+`envoy` example as a long-running stress test.
 
 ## 8. Verify MCP, VictoriaMetrics, and Grafana
 
