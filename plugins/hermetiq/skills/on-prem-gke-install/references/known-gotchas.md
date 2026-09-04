@@ -250,8 +250,32 @@ CR instance is applied separately from the Hermetiq chart. Two consequences:
 
 - **On uninstall:** `helm uninstall buildbarn` removes the frontend/scheduler/
   storage but leaves any `RbeWorker` resources — and their pods — running.
-  Delete them explicitly first: `kubectl -n <namespace> delete rbeworker --all`.
-  Skipping this can leave orphaned worker pods that end up in a terminal
+  Inventory them before changing anything:
+
+  ```bash
+  kubectl -n <namespace> get rbeworker \
+    -o custom-columns='NAME:.metadata.name,LABELS:.metadata.labels,OWNERS:.metadata.ownerReferences[*].name'
+  ```
+
+  Match each reported name to the exact manifest that was applied for the
+  Buildbarn installation being removed. The example worker manifests do not
+  currently add Helm release labels or owner references, so an empty
+  `LABELS` or `OWNERS` column is not proof that a resource belongs to the
+  target release. Confirm the manifest source and the worker's configured
+  Buildbarn service addresses before selecting it.
+
+  Deleting an `RbeWorker` immediately removes that pool's execution capacity.
+  Record the selected names and source manifests, then delete only the verified
+  resources by exact name, for example:
+
+  ```bash
+  kubectl -n <namespace> delete rbeworker <verified-worker-name-1> <verified-worker-name-2>
+  ```
+
+  Re-display the fully substituted command and confirm every name before
+  running it. If the wrong pool is removed, reapply its recorded manifest to
+  restore it. Skipping the worker cleanup can leave orphaned worker pods that
+  end up in a terminal
   `Failed` phase once their backing Secrets/ConfigMaps disappear from other
   `helm uninstall` steps, which in turn can **block `kubectl delete namespace`
   from completing** — the namespace controller won't finish while any pod
