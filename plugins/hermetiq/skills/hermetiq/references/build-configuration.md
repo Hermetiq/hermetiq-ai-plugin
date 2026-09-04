@@ -21,7 +21,11 @@ an opaque ID, call `resolve_build_or_invocation` first and use the returned
   `interrupted`, `in_progress`, `unknown` — never `exitCode`, which is absent rather than 0
   when the backend recorded none. When comparing a drifted configuration against a working
   one, exclude `unknown` invocations rather than counting them as successes.
-- **Build tool version**: `buildToolVersion` reveals the Bazel version.
+- **Build tool version**: `data.invocation.buildToolVersion` reveals the Bazel
+  version. Parse its major version and apply the Bazel 5–9 compatibility matrix
+  in `bazel-optimization.md` before recommending a flag. If it is unavailable,
+  unparseable, or outside that range, ask for the version or ask the user to
+  verify the candidate with `bazel help build --long`; do not guess a spelling.
 - **User and host**: `user` and `host` identify who ran the build and from where.
 
 ## Configuration Drift Detection
@@ -52,15 +56,16 @@ Signals of configuration drift:
 
 ## Hermeticity Flag Audit
 
-When cache hit rates are poor, verify these flags from invocation data. If a flag is missing,
-recommend adding it to the project's shared `.bazelrc`:
+When cache hit rates are poor, verify these flags from invocation data. A
+missing flag is not enough to recommend it: confirm the telemetry signal and
+the invocation's `data.invocation.buildToolVersion`, then apply the version and
+default gates in `bazel-optimization.md`.
 
-| Flag | Purpose | How to Detect Absence |
+| Flag | Purpose | How to Detect a Need |
 |------|---------|----------------------|
-| `--incompatible_strict_action_env` | Prevents environment variable leakage into actions | `ENV_CHANGED` miss reasons; different cache keys for identical code across machines |
-| `--nostamp` | Disables volatile timestamp/git-SHA embedding | `INPUT_CHANGED` misses on stamped targets; volatile workspace status in command line |
-| `--noexperimental_check_external_repository_files` | Avoids unnecessary re-fetching of external repos | Slow analysis phase; cache misses after repository fetch |
-| `--experimental_remote_cache_compression` | Compresses Content Addressable Storage transfers | High input fetch and output upload times with moderate blob sizes |
+| `--incompatible_strict_action_env` (Bazel 5–8; default `false`) | Prevents environment variable leakage into actions. Bazel 9 defaults to strict action environments, so add nothing for Bazel 9 alone. An explicit setting in a shared Bazel 5–9 rc file may preserve consistent behavior for older clients. | `ENV_CHANGED` miss reasons; different cache keys for identical code across machines |
+| `--nostamp` (Bazel 5–9; stamping defaults to `false`) | Overrides effective stamping. Its absence is already the healthy default; add it only to override an inherited `--stamp` or implement an explicit shared compatibility policy. | Last-wins command-line parsing shows stamping enabled outside an intended release configuration, corroborated by volatile workspace status or `INPUT_CHANGED` misses |
+| `--experimental_remote_cache_compression` (Bazel 5–6) or `--remote_cache_compression` (Bazel 7–9); default `false` | Compresses Content Addressable Storage transfers when the remote cache supports compressed blobs | High input fetch and output upload times with moderate blob sizes |
 | `--remote_download_minimal` | Only downloads outputs needed locally | `get_invocation.data.profile.bottleneckKind == "output_download_bound"`, or an `output_download_bound` classification from `get_profile_trends`. Do **not** use `metrics.bytesReceived` — it is a whole-host network counter for the machine that ran the build, not Bazel remote-cache traffic |
 
 ## Remote Execution Flag Tuning
@@ -70,8 +75,8 @@ These flags affect remote execution performance. Recommend values based on obser
 | Flag | What It Controls | How to Tune from Data |
 |------|-----------------|----------------------|
 | `--jobs=<N>` | Bazel's maximum concurrent actions; it is not remote worker capacity | Use only an explicit numeric value from a complete `get_invocation(includeCommandLine=true)` result, applying last-wins semantics. Compare it only with `get_build_parallelism`'s executing remote-action concurrency. The scheduler executing gauge, unique participating workers, worker slots, and replicas are different quantities and must not be compared with `--jobs`. A peak below `--jobs` is a graph signal only when remote queue wait and scheduler backlog are low. High queueing with low executing parallelism supports worker/scheduler capacity as a hypothesis, and hitting `--jobs` while queueing is high is not a reason to raise it. Treat absent/`auto`/formula/truncated values as an unknown numeric cap. |
-| `--remote_timeout=<seconds>` | Per-action timeout for remote execution | Check slowest actions in `analyze_remote_execution`. Set to 2-3x the slowest expected action. Default 3600 seconds is usually sufficient. |
-| `--remote_retries=<N>` | Retry count for transient remote failures | Check action failure rates in `get_grpc_health`. If transient errors are common, increase from default 5. If errors are deterministic, retries waste time. |
+| `--remote_timeout=<duration>` (Bazel 5–9) | Maximum wait for remote execution and cache calls, including individual blob transfers; default `60s` | Use remote timing or gRPC evidence to identify the slowest legitimate call and add margin. A `ByteStream.Write` or read can hit this timeout even when no remote action is running. |
+| `--remote_retries=<N>` (Bazel 5–9) | Retry count for transient remote failures; default `5` | Do not add `--remote_retries=5`, which only restates the default. Change it only when `get_grpc_health` shows transient errors; deterministic errors make retries waste time. |
 | `--remote_default_exec_properties` | Default platform properties for remote actions | Check `get_scheduler_health` per-platform breakdown. Ensure properties match worker platforms that have capacity. |
 
 ## Stamping Audit
@@ -83,13 +88,22 @@ downstream action's cache key.
 How to detect stamping problems from Hermetiq data:
 
 1. Look for `workspace_status_command` in invocation command-line arguments.
-2. Check for `--stamp` or the absence of `--nostamp`.
-3. Look for `INPUT_CHANGED` misses where the diff shows `inputRootDigest` changed but the
+2. Resolve the effective stamp state from the complete command line using
+   last-wins semantics across `--stamp`, `--stamp=true`, `--nostamp`, and
+   `--stamp=false`. When no stamp flag is present, Bazel's default is stamping
+   disabled; treat that as healthy rather than as a missing recommendation.
+3. Only flag stamping when the effective state is enabled outside a configuration
+   that intentionally produces release artifacts.
+4. Look for `INPUT_CHANGED` misses where the diff shows `inputRootDigest` changed but the
    user made no meaningful source change.
-4. Check whether cache miss patterns correlate with time-of-day rather than code changes.
+5. Check whether cache miss patterns correlate with time-of-day rather than code changes.
 
-Recommendation: use `--nostamp` as the default. Only enable `--stamp` for release builds via a
-named configuration, such as `build:release --stamp`.
+Recommendation: if last-wins parsing finds an inherited `--stamp` and that
+configuration should not stamp, add a scoped `--nostamp` override. Do not add it
+when no stamp flag is present. An explicit unstamped setting is also reasonable
+when the team deliberately documents one compatibility policy across shared rc
+files. Keep intentional stamping in a named release configuration, such as
+`build:release --stamp`.
 
 ## Toolchain Version Management
 
@@ -120,13 +134,14 @@ change with a worker image prerequisite. See the `container-image` subsection un
 
 When auditing a project's configuration, systematically verify:
 
-- [ ] `--incompatible_strict_action_env` is set
-- [ ] `--nostamp` is the default, with stamping only for release builds
+- [ ] The invocation's `data.invocation.buildToolVersion` is within the supported Bazel 5–9 range before version-sensitive flags are named
+- [ ] Strict action environments are effective (`--incompatible_strict_action_env` for Bazel 5–8; already the Bazel 9 default)
+- [ ] Effective last-wins stamping is disabled for non-release builds; no stamp flag is present is already healthy, and an explicit `--nostamp` is recommended only to override inherited configuration or document an intentional shared compatibility policy
 - [ ] No volatile `workspace_status_command` values propagate to non-release actions
 - [ ] All users and CI share the same `.bazelrc` flags
 - [ ] Toolchains are pinned, not system-installed compilers
 - [ ] External repositories are pinned to exact versions
 - [ ] `--remote_download_minimal` is enabled to reduce network transfer
-- [ ] `--experimental_remote_cache_compression` is enabled to reduce storage transfer time
+- [ ] Cache compression uses `--experimental_remote_cache_compression` for Bazel 5–6 or `--remote_cache_compression` for Bazel 7–9 when transfer evidence and server support justify it
 - [ ] `--jobs` is set appropriately for the observed worker fleet capacity
 - [ ] Platform properties are consistent across the team

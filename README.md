@@ -202,7 +202,9 @@ catalog and the authoritative server fixture:
 ```bash
 python3 scripts/validate-mcp-catalog.py \
   --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json
-python3 -m unittest scripts/test_validate_mcp_catalog.py scripts/test_run_mcp_evals.py -v
+python3 scripts/validate-bazel-guidance.py
+python3 -m unittest scripts/test_validate_mcp_catalog.py \
+  scripts/test_run_mcp_evals.py scripts/test_validate_bazel_guidance.py -v
 ```
 
 Run the real Claude/official-MCP canary suite with the API key and fixture IDs in
