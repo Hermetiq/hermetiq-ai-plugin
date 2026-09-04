@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Build a skill-only release zip for upload to a GitHub release.
+# Build one skill-only release zip per supported manual-install skill.
 #
-# Produces a zip with the same structure as v0.9.0-beta:
-#   hermetiq/SKILL.md
-#   hermetiq/references/*.md
+# Produces:
+#   hermetiq-ai-plugin-<version>.zip
+#   hermetiq-on-prem-gke-install-<version>.zip
 #
-# The evals/ directory is excluded — it's a dev-time artifact and not needed
-# by Claude Desktop users installing the skill.
+# Each archive has exactly one top-level skill directory, as expected by
+# Claude Desktop. Development-only evals are excluded.
 #
 # Usage:
 #   scripts/build-release-zip.sh <version>
@@ -16,7 +16,7 @@
 #   scripts/build-release-zip.sh v0.9.2-beta
 #
 # Output:
-#   tmp/release-<version>/hermetiq-ai-plugin-<version>.zip
+#   tmp/release-<version>/*.zip
 #
 # Upload with:
 #   gh release upload <version> \
@@ -37,35 +37,50 @@ VERSION="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SKILL_SRC="$REPO_ROOT/plugins/hermetiq/skills/hermetiq"
+SKILLS_ROOT="$REPO_ROOT/plugins/hermetiq/skills"
 STAGE_DIR="$REPO_ROOT/tmp/release-$VERSION"
-ZIP_NAME="hermetiq-ai-plugin-$VERSION.zip"
-ZIP_PATH="$STAGE_DIR/$ZIP_NAME"
+SUPPORTED_SKILLS=("hermetiq" "on-prem-gke-install")
 
-if [[ ! -d "$SKILL_SRC" ]]; then
-  echo "error: skill source not found at $SKILL_SRC" >&2
-  exit 1
-fi
+for skill in "${SUPPORTED_SKILLS[@]}"; do
+  if [[ ! -d "$SKILLS_ROOT/$skill" ]]; then
+    echo "error: skill source not found at $SKILLS_ROOT/$skill" >&2
+    exit 1
+  fi
+done
 
 # Fresh stage dir each run so re-builds don't pick up stale files.
-rm -rf "$STAGE_DIR"
+case "$STAGE_DIR" in
+  "$REPO_ROOT"/tmp/release-*) ;;
+  *) echo "error: refusing to recreate unexpected stage path: $STAGE_DIR" >&2; exit 1 ;;
+esac
+rm -rf -- "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
-# Copy the skill tree, then strip dev-only directories.
-cp -R "$SKILL_SRC" "$STAGE_DIR/"
-rm -rf "$STAGE_DIR/hermetiq/evals"
+for skill in "${SUPPORTED_SKILLS[@]}"; do
+  cp -R "$SKILLS_ROOT/$skill" "$STAGE_DIR/"
+  if [[ -d "$STAGE_DIR/$skill/evals" ]]; then
+    rm -rf -- "$STAGE_DIR/$skill/evals"
+  fi
 
-# Zip from inside the stage dir so the archive paths start with `hermetiq/`,
-# not a longer absolute path.
-( cd "$STAGE_DIR" && zip -r "$ZIP_NAME" hermetiq/ )
+  if [[ "$skill" == "hermetiq" ]]; then
+    zip_name="hermetiq-ai-plugin-$VERSION.zip"
+  else
+    zip_name="hermetiq-$skill-$VERSION.zip"
+  fi
 
-echo
-echo "Built: $ZIP_PATH"
-echo
-echo "Contents:"
-unzip -l "$ZIP_PATH"
+  # Zip from inside the stage dir so each archive has one skill at its root.
+  ( cd "$STAGE_DIR" && zip -r "$zip_name" "$skill/" )
+  rm -rf -- "$STAGE_DIR/$skill"
+
+  echo
+  echo "Built: $STAGE_DIR/$zip_name"
+  echo
+  echo "Contents:"
+  unzip -l "$STAGE_DIR/$zip_name"
+done
 echo
 echo "Upload with:"
 echo "  gh release upload $VERSION \\"
-echo "    $ZIP_PATH \\"
+echo "    $STAGE_DIR/hermetiq-ai-plugin-$VERSION.zip \\"
+echo "    $STAGE_DIR/hermetiq-on-prem-gke-install-$VERSION.zip \\"
 echo "    --repo Hermetiq/hermetiq-ai-plugin"

@@ -1,0 +1,23 @@
+name: Plugin release guard
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a synchronized plugin version bump
+        run: python3 scripts/check-plugin-version.py --base-ref "${{ github.event.pull_request.base.sha }}"
+      - name: Run unit tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Validate Claude manifests
+        run: |
+          npx --yes @anthropic-ai/claude-code@2.1.231 plugin validate --strict .claude-plugin/marketplace.json
+          npx --yes @anthropic-ai/claude-code@2.1.231 plugin validate --strict plugins/hermetiq
