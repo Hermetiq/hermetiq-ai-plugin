@@ -21,6 +21,7 @@
 # Upload with:
 #   gh release upload <version> \
 #     tmp/release-<version>/hermetiq-ai-plugin-<version>.zip \
+#     tmp/release-<version>/hermetiq-on-prem-gke-install-<version>.zip \
 #     --repo Hermetiq/hermetiq-ai-plugin
 
 set -euo pipefail
@@ -33,12 +34,19 @@ fi
 
 VERSION="$1"
 
+RELEASE_TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+if [[ ! "$VERSION" =~ $RELEASE_TAG_PATTERN ]]; then
+  echo "error: version must be a valid release tag such as v0.9.6-beta" >&2
+  exit 1
+fi
+
 # Resolve repo root from this script's location so the script works from any cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SKILLS_ROOT="$REPO_ROOT/plugins/hermetiq/skills"
-STAGE_DIR="$REPO_ROOT/tmp/release-$VERSION"
+TMP_ROOT="$(realpath -m -- "$REPO_ROOT/tmp")"
+STAGE_DIR="$(realpath -m -- "$TMP_ROOT/release-$VERSION")"
 SUPPORTED_SKILLS=("hermetiq" "on-prem-gke-install")
 
 for skill in "${SUPPORTED_SKILLS[@]}"; do
@@ -48,11 +56,16 @@ for skill in "${SUPPORTED_SKILLS[@]}"; do
   fi
 done
 
-# Fresh stage dir each run so re-builds don't pick up stale files.
-case "$STAGE_DIR" in
-  "$REPO_ROOT"/tmp/release-*) ;;
-  *) echo "error: refusing to recreate unexpected stage path: $STAGE_DIR" >&2; exit 1 ;;
-esac
+# Resolve symlinks and normalization before deletion, then require the stage
+# directory to be an immediate child of this checkout's canonical tmp root.
+if [[ "$(dirname -- "$STAGE_DIR")" != "$TMP_ROOT" ]]; then
+  echo "error: refusing to recreate stage path outside $TMP_ROOT: $STAGE_DIR" >&2
+  exit 1
+fi
+if [[ -e "$STAGE_DIR" ]]; then
+  echo "Recreating existing stage directory: $STAGE_DIR"
+  find "$STAGE_DIR" -mindepth 1 -maxdepth 2 -printf '  %P\n' | sort
+fi
 rm -rf -- "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
