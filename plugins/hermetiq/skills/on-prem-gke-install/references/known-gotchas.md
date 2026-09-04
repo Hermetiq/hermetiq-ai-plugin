@@ -76,7 +76,10 @@ build:hermetiq --remote_timeout=1800s
 build:hermetiq --bes_timeout=600s
 ```
 
-`--remote_timeout` defaults to **exactly 60 seconds** in Bazel. Any single
+For Bazel 5–9, the range covered by the Hermetiq flag-guidance matrix,
+`--remote_timeout` defaults to **exactly 60 seconds**. When invocation telemetry
+is available, confirm the version from `data.invocation.buildToolVersion` before
+emitting a `.bazelrc` line. Any single
 `ByteStream.Write` (one blob upload — a static library, a fat jar, a
 toolchain-bootstrap artifact) that takes longer than that to transfer gets
 cancelled by the *client*, not the server. On a large enough project
@@ -101,9 +104,9 @@ this — kept here so you don't repeat them):
 2. **"The scheduler isn't dispatching work."** If, after raising
    `--remote_timeout`, you see an action stuck with `0 running` for many
    minutes, and `kubectl top pod` shows near-zero CPU on every worker while
-   the Hermetiq MCP server's `GetSchedulerQueueHealth` shows
+   the Hermetiq MCP server's `get_scheduler_health` shows
    `queue_depth: 0, executing: 0` — this looks exactly like a stuck
-   dispatcher, but `GetSchedulerQueueHealth` tracks the `Execute` queue
+   dispatcher, but `get_scheduler_health` tracks the `Execute` queue
    only. A stalled `ByteStream.Write` **never touches the scheduler at
    all**, so this metric is uninformative for that failure mode. Don't
    read "zero queue depth" as "nothing is happening" unless you've confirmed
@@ -118,7 +121,7 @@ this — kept here so you don't repeat them):
    blob size as plain text:
    `{instance}/uploads/{uuid}/blobs/{sha256}/{size-in-bytes}`. If you see a
    multi-hundred-MB blob, that's your answer.
-3. Only reach for `kubectl top pod`/`GetSchedulerQueueHealth` if the stalled
+3. Only reach for `kubectl top pod`/`get_scheduler_health` if the stalled
    RPC is confirmed to be `Execute`, not `ByteStream.Write`/`Read`.
 
 **One real, separate fix still worth keeping:** the `buildbarn` chart's
@@ -224,7 +227,7 @@ Older examples set `bootstrap.namespaceDashboardUrl` to
 `https://grafana.<domain>/d/hermetiq`, but the chart's shipped dashboard UID is
 `hermetiq-demo`. The current `hermetiq-k8s/custom-values/hermetiq-values.yaml`
 uses `/d/hermetiq-demo`; preserve that value when adapting it. A stale override
-still produces a Grafana 404 the first time a user (or the web UI's Quickstart
+still produces a Grafana 404 the first time a user (or the web UI's quickstart
 page) clicks through. Verify the dashboard UID directly against Grafana:
 
 ```bash
@@ -250,8 +253,32 @@ CR instance is applied separately from the Hermetiq chart. Two consequences:
 
 - **On uninstall:** `helm uninstall buildbarn` removes the frontend/scheduler/
   storage but leaves any `RbeWorker` resources — and their pods — running.
-  Delete them explicitly first: `kubectl -n <namespace> delete rbeworker --all`.
-  Skipping this can leave orphaned worker pods that end up in a terminal
+  Inventory them before changing anything:
+
+  ```bash
+  kubectl -n <namespace> get rbeworker \
+    -o custom-columns='NAME:.metadata.name,LABELS:.metadata.labels,OWNERS:.metadata.ownerReferences[*].name'
+  ```
+
+  Match each reported name to the exact manifest that was applied for the
+  Buildbarn installation being removed. The example worker manifests do not
+  currently add Helm release labels or owner references, so an empty
+  `LABELS` or `OWNERS` column is not proof that a resource belongs to the
+  target release. Confirm the manifest source and the worker's configured
+  Buildbarn service addresses before selecting it.
+
+  Deleting an `RbeWorker` immediately removes that pool's execution capacity.
+  Record the selected names and source manifests, then delete only the verified
+  resources by exact name, for example:
+
+  ```bash
+  kubectl -n <namespace> delete rbeworker <verified-worker-name-1> <verified-worker-name-2>
+  ```
+
+  Re-display the fully substituted command and confirm every name before
+  running it. If the wrong pool is removed, reapply its recorded manifest to
+  restore it. Skipping the worker cleanup can leave orphaned worker pods that
+  end up in a terminal
   `Failed` phase once their backing Secrets/ConfigMaps disappear from other
   `helm uninstall` steps, which in turn can **block `kubectl delete namespace`
   from completing** — the namespace controller won't finish while any pod

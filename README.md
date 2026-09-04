@@ -19,12 +19,12 @@ A [Hermetiq](https://dashboard.hermetiq.io) account with at least one project re
 
 ## Install in Claude Code
 
-```bash
-# Add the Hermetiq marketplace
-/plugin marketplace add Hermetiq/hermetiq-ai-plugin
+Paste these slash commands inside Claude Code:
 
-# Install the plugin
+```text
+/plugin marketplace add Hermetiq/hermetiq-ai-plugin
 /plugin install hermetiq@hermetiq
+/reload-plugins
 ```
 
 > The plugin marketplace is a Claude Code (CLI) feature, not Claude Desktop.
@@ -60,12 +60,13 @@ To configure the MCP server without the plugin, add this to your Claude Code MCP
 
 ## Usage
 
-Claude activates the skill automatically when you ask about build performance. You can also invoke it directly:
+Claude activates the skill automatically when you ask about build performance.
+For a marketplace plugin install, invoke the skill with its plugin namespace:
 
 ```
-/hermetiq analyze my latest build
-/hermetiq why is my cache hit rate dropping?
-/hermetiq compare this week's builds to last week
+/hermetiq:hermetiq analyze my latest build
+/hermetiq:hermetiq why is my cache hit rate dropping?
+/hermetiq:hermetiq compare this week's builds to last week
 ```
 
 Or ask naturally:
@@ -136,6 +137,9 @@ Then in Claude Desktop:
 2. Click **+** > **Upload a skill**
 3. Select `hermetiq.zip`, then repeat for `on-prem-gke-install.zip`
 
+This standalone uploaded skill is invoked as `/hermetiq`; the
+`/hermetiq:hermetiq` namespace above applies to the marketplace plugin install.
+
 ### 3. Enable code execution
 
 Go to **Settings > Capabilities** and toggle on **Code execution and file creation**.
@@ -199,7 +203,10 @@ Show cache miss reasons by mnemonic for my failing builds
 | `evals/canonical-mcp-catalog.json` | Release snapshot of canonical tools plus explicit prompt/resource/external-tool allowlists |
 | `on-prem-gke-install/SKILL.md` | GKE installation workflow for self-hosted Hermetiq and Buildbarn |
 | `on-prem-gke-install/references/known-gotchas.md` | Verified GKE, Gateway API, Auth0, Helm, and Buildbarn installation pitfalls |
+| `scripts/testdata/cloud-native-mcp-catalog.json.gz` | Exact compressed cloud-native server fixture used for deterministic CI parity checks |
+| `scripts/testdata/cloud-native-mcp-catalog.provenance.json` | Source revision and SHA-256 manifest verified by CI |
 | `scripts/validate-mcp-catalog.py` | Mechanical catalog-to-skill drift validator; pass `--server-catalog` to compare with the cloud-native fixture |
+| `scripts/sync-mcp-catalog.py` | Refresh both checked-in snapshots from an authoritative cloud-native catalog fixture |
 
 ## Release versioning
 
@@ -226,8 +233,37 @@ catalog and the authoritative server fixture:
 python3 scripts/validate-mcp-catalog.py \
   --server-catalog ../cloud-native/bep-nats/mcpv2/testdata/catalog/current.json
 python3 scripts/check-plugin-version.py --base-ref origin/main
-python3 -m unittest scripts/test_validate_mcp_catalog.py scripts/test_run_mcp_evals.py -v
+python3 scripts/validate-bazel-guidance.py
+python3 -m unittest scripts/test_validate_mcp_catalog.py \
+  scripts/test_run_mcp_evals.py scripts/test_validate_bazel_guidance.py -v
 ```
+
+CI validates every distributable text file under `plugins/hermetiq/skills/**`
+and eval arguments against an exact compressed snapshot of
+`Hermetiq/cloud-native`'s private
+`bep-nats/mcpv2/testdata/catalog/current.json`. The compact plugin catalog's
+`source`, `sourceRevision`, `server`, and `serverVersion` fields record the
+provenance. Because this public repository's GitHub token cannot read the
+private source repository, refresh and verify both snapshots locally from the
+latest `cloud-native` `origin/main` before releasing:
+
+```bash
+git -C ../cloud-native fetch origin main
+git -C ../cloud-native show \
+  origin/main:bep-nats/mcpv2/testdata/catalog/current.json \
+  > /tmp/hermetiq-mcp-catalog.json
+python3 scripts/sync-mcp-catalog.py \
+  --server-catalog /tmp/hermetiq-mcp-catalog.json \
+  --source-revision "$(git -C ../cloud-native rev-parse origin/main)"
+python3 scripts/validate-mcp-catalog.py \
+  --server-catalog /tmp/hermetiq-mcp-catalog.json \
+  --server-provenance scripts/testdata/cloud-native-mcp-catalog.provenance.json
+```
+
+CI verifies the uncompressed fixture checksum and matches its source and
+revision to the compact catalog. It cannot independently query whether that
+recorded revision is still the tip of private `cloud-native`; the authenticated
+refresh command above is therefore a required release step.
 
 Run the real Claude/official-MCP canary suite with the API key and fixture IDs in
 the environment. In addition to tool selection, the suite requires supported
