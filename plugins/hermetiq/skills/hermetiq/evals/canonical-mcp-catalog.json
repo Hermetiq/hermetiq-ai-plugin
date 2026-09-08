@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "c27c257f223d338216e0d05d6683ab5a36f242f6",
+  "sourceRevision": "057a68e68f00f5c429cbf38d591a7477aa8f2a6c",
   "server": "hermetiq-mcp-v2",
   "serverVersion": "0.18.0",
   "tools": [
@@ -99,6 +99,7 @@
       "rbe_optimization",
       "rbe_trends",
       "setup_hermetiq_bazel",
+      "storage_optimization",
       "test_failures",
       "weekly_trends_report"
     ],
