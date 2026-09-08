@@ -36,6 +36,25 @@ Read these only when the user needs the deeper detail:
 - `references/infrastructure-tuning.md`: Buildbarn storage, workers, scheduler, and
   scaling guidance.
 
+## Use the Server Prompts
+
+The Hermetiq MCP server ships 19 prompts, and each one is the tested, version-locked
+contract for a whole investigation: the call order, the branch conditions, the stop rules,
+and the caveats that keep a figure honest. They are the same recipes this skill describes,
+maintained on the server where they are pinned and regression-tested rather than restated
+by hand. **When a prompt covers the user's question, its wording is authoritative and this
+skill is the summary** — where the two ever disagree, follow the prompt.
+
+You cannot invoke a prompt yourself; the user runs it as a slash command. So when a request
+maps cleanly onto one, say so in a line and carry on answering — do not stop and wait:
+
+> This maps onto the `analyze_invocation` prompt, which runs the full bounded flow. I will
+> follow the same sequence here.
+
+The Intent to Tool Map below names the prompt for each intent that has one. Intents with no
+prompt — build configuration audit, filter discovery, ad-hoc target questions — are served
+by this skill alone.
+
 ## MCP Alignment
 
 Use only the lower-snake-case names returned by the connected server's
@@ -240,6 +259,16 @@ context and likewise are not tool calls.
   `"30d"` where the schema offers those values. Build/invocation history also
   accepts bounded hour/day durations documented by its schema. Live
   infrastructure tools use `timeRange`, such as `"1h"`, `"24h"`, or `"7d"`.
+- **A live infrastructure window that does not end now uses `startTime` and
+  `endTime`**, RFC 3339, on `get_storage_health`, `get_scheduler_health`,
+  `get_worker_fleet_health`, `get_grpc_health`, `summarize_infrastructure_health`,
+  `get_worker_scaling_timeline`, `list_buildbarn_events` and
+  `get_buildbarn_pod_logs`. Reach for these whenever the user names a past
+  interval — "between 6:09 and 6:24 last night" is answerable directly rather
+  than by hunting for an invocation whose padded window happens to overlap it.
+  Convert the user's local time to an explicit offset or UTC; `endTime` defaults
+  to now. They cannot be combined with `timeRange` or `invocationId`, each of
+  which already defines a window, and the span cannot exceed 30d.
 - History tools use singular `command`; aggregated trend tools use `commands`,
   an array of at most 20 values.
 - Use `limit`/`offset` only when listed. `list_builds` uses the opaque
@@ -293,6 +322,7 @@ context and likewise are not tool calls.
 | Project activity | `get_project_activity` | `summarize_project_trends`, `summarize_build_history` |
 | Build configuration audit | `list_invocations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`, `find_cache_events` |
 | Storage configuration audit / sizing | `analyze_buildbarn_storage` (or `get_buildbarn_config` only if present) | `get_storage_health`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
+| "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Four rows carry the tuning signal and each points at a different cause: `eviction_age_min_shard` (capacity, not correctness), `hash_get_too_many_attempts` and `hash_put_too_many_iterations` (key-location map sized below the object count), and the `cas_`/`ac_error_rate_pct` pair, which are the only rows meaning something is broken rather than small — quote the operation counts beside them, because a near-idle store shows an alarming ratio over a handful of requests. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say the configuration is adequate for the observed load. The `storage_optimization` prompt runs this end to end |
 | Hermetiq setup | `setup_hermetiq_bazel` prompt | Local `.bazelrc` follow-up only when the client has file access and the user approves edits |
 
 For cache, remote action, and target analysis, start grouped, then drill down:
@@ -328,8 +358,15 @@ record includes:
 `estimatedSavings`, `caveats`, and typed `affectedItems` for actions, targets,
 mnemonics, phases, or flags.
 
-- Rank by `data.insights[].estimatedSavings.percentOfWallTime` when present. If there is no
-  numeric estimate, keep the insight but label the impact qualitative.
+- An empty `data.insights` is not a clean build. Read `data.noInsightsReason`: when it is set,
+  the list is empty because no profile was measured — a build still running, or one that never
+  captured one — and reporting the build as clean is wrong. Empty with no reason does mean the
+  profile was analyzed and nothing was flagged.
+- Rank by kind before magnitude. A correctness insight such as `disk_cache_with_remote_execution`
+  describes a build that can fail later and leads regardless of duration; performance insights
+  follow. `estimatedSavings` is now absent from almost every insight, so ordering by the
+  evidence an insight cites is the normal path — never invent a percentage the tool did not
+  return, and never add two together.
 - These field names belong to `get_invocation_insights`. The copy embedded in
   `get_invocation` under `data.profile.insights` uses a different, older schema —
   `id`, `category`, `potentialSavingsPercent`, `severity`, `confidence`,

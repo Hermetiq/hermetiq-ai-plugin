@@ -165,8 +165,16 @@ events.
 
 Exact fields:
 - `bazelVersion`
-- `wallTimeSeconds`, `analysisSeconds`, `executionSeconds`
-- `remoteExecutionSeconds`, `remoteQueueSeconds`, `criticalPathSeconds`, `gcSeconds`
+- Wall-clock, bounded by the build's own duration: `wallTimeSeconds`, `analysisSeconds`,
+  `executionSeconds`, `criticalPathSeconds`
+- Sums over concurrent action spans, which routinely exceed the build and are **never** a share
+  of wall time: `actionTimeSeconds`, `remoteExecutionSeconds`, `remoteQueueSeconds`,
+  `criticalPathQueueSeconds`, `gcSeconds`. Weigh these against `actionTimeSeconds`, never
+  against `wallTimeSeconds` — dividing one by the other is what once had an insight reporting
+  two thirds of a build's wall time as recoverable from a single flag.
+- `criticalPathQueueSeconds` is queue wait on critical-path actions only, and is the queue time
+  that actually extended the build; `remoteQueueSeconds` is far larger and mostly ran in parallel.
+- `analysisSeconds` comes from Bazel's own timing metrics where the build reported them.
 - `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
 - `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
   `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
@@ -182,7 +190,13 @@ the current typed insight schema when only the action plan is needed.
 - `pillar` — `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, or `PROFILE_QUALITY`.
 - `title`, `summary`, `recommendation` — user-facing copy.
 - `estimatedSavings.percentOfWallTime`, `estimatedSavings.seconds`,
-  `estimatedSavings.humanReadable` — rough savings projection; percent is the ranking key.
+  `estimatedSavings.humanReadable` — present on almost no insight now. The rules that priced
+  wall time were withdrawn once their arithmetic was checked, so treat a missing estimate as
+  the normal case and never supply a number the tool did not return.
+- `data.noInsightsReason` — set when `insights` is empty and the emptiness is not a verdict, for
+  example a build that has not finished or never captured a profile. An empty list with no
+  reason means the profile was analyzed and nothing was flagged; an empty list *with* one is not
+  a clean bill of health.
 - `caveats` — uncertainty notes that must be surfaced with the recommendation.
 - `affectedItems` — typed pointers (`ACTION`, `TARGET`, `MNEMONIC`, `PHASE`, `FLAG`) with an
   optional metric label and duration. Use these to choose drill-down calls.
@@ -191,8 +205,10 @@ Insight workflow:
 1. Resolve the user's ID; if it is a build ID, choose the primary/latest invocation attempt from
    `get_build_details`.
 2. Call `get_invocation_insights(invocationId=...)`.
-3. Rank by `data.insights[].estimatedSavings.percentOfWallTime`, keeping qualitative insights when no
-   numeric savings are available.
+3. Rank by kind before magnitude. A correctness insight such as `disk_cache_with_remote_execution`
+   describes a build that can fail later and leads regardless of duration; performance insights
+   follow. Use `estimatedSavings.percentOfWallTime` only on the rare insight that carries it, and
+   never add two together — concurrent insights can each claim a share of the same wall time.
 4. Validate the top insights with the smallest underlying tool call: `find_actions`,
    `find_cache_events(includeMissAnalysis=true)`, `analyze_remote_execution`, or
    `get_build_parallelism`.
@@ -309,9 +325,13 @@ set. The public request supports `lookback`, `pattern`, `repository`, `branch`, 
 Response fields are under `data` and use proto-JSON camelCase:
 - `summary.totalBuilds` / `summary.buildsWithProfile` — profile coverage. Low coverage means
   profile conclusions are conditional.
-- `summary.avgBuildWallTimeMicros`, `avgAnalysisWallMicros`,
-  `avgExecutionWallMicros`, and `avgActionTotalMicros` — build time anatomy and effective
-  action parallelism.
+- `summary.avgBuildWallTimeMicros`, `avgExecutionWallMicros`, and `avgActionTotalMicros` —
+  build time anatomy and effective action parallelism.
+- `summary.avgAnalysisWallMicros` and `summary.analysisMicrosSum` always read 0, and `analysis`
+  is absent from `phaseTrends`. The underlying column means different things depending on which
+  profile phase markers a capture carried, so the server suppresses these rather than publish a
+  wrong figure. For per-invocation analysis time use `data.profile.analysisSeconds` from
+  `get_invocation`, which comes from Bazel's own timing metrics.
 - `summary.remoteQueueMicrosSum`, `remoteFetchMicrosSum`,
   `remoteProcessMicrosSum`, `remoteUploadMicrosSum`,
   `remoteOutputDownloadMicrosSum`, and `remoteCacheCheckMicrosSum` — remote phase mix.
@@ -516,9 +536,10 @@ collection:
   per record, with the record count automatically rounded down to a prime (no need to
   pre-compute primes).
 - An undersized map fails **silently**: inserts displace older entries and eventually drop,
-  so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`,
-  `hash_put_too_many_iterations`, and `hash_put_ignored_invalid` rows in `get_storage_health`. **The map and the blocks are coupled** — growing the disk without
-  growing the map makes eviction worse.
+  so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`
+  and `hash_put_too_many_iterations` rows in `get_storage_health`; any sustained non-zero
+  value means the map is sized below the live object count. **The map and the blocks are
+  coupled** — growing the disk without growing the map makes eviction worse.
 - Can be stored in-memory (faster, lost on restart) or on block device (persistent).
 
 **Persistence**: a store survives restarts only when three pieces survive together — the

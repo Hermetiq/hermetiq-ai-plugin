@@ -37,13 +37,19 @@ discarded whole. A fixed-size open-addressed hash table (the **key-location map*
 blob locations and never grows.
 
 **`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter;
-omit it to get both). The payload exposes `data.projectId`, `data.start`, `data.end`,
+omit it to get both). Those two are the whole vocabulary and the schema enumerates them, so
+a value outside it is rejected before the call reaches the server. ISCC and FSAC are real
+Buildbarn stores that `analyze_buildbarn_storage` classifies, and they do emit block-eviction
+telemetry — but not the operation, error and latency rows a health verdict is built from, so
+`get_storage_health` has no CAS/AC-equivalent answer for them: read their configuration and stop
+there rather than forwarding their name as a `storageType`. The payload exposes `data.projectId`, `data.start`, `data.end`,
 `data.status`, `data.assessment`, `data.assessmentReason`, and `data.metrics[]`. Each metric
 row carries `name`, `labels`, `value`, `unit`, and `aggregation`.
 
 `data.assessment` is `healthy`, `degraded`, `critical`, or `no_data`, computed server-side
-from eviction age, the **worse of `cas_error_rate_pct` and `ac_error_rate_pct`**, and
-key-location-map pressure. `data.assessmentReason` names the rows, values, and thresholds it
+from eviction age *when an eviction was observed in the window*, the **worse of
+`cas_error_rate_pct` and `ac_error_rate_pct`**, and key-location-map pressure. Error rate and
+key-location-map pressure are judged regardless; retention is not. `data.assessmentReason` names the rows, values, and thresholds it
 used — quote it with the verdict rather than the verdict alone. `get_scheduler_health`,
 `get_worker_fleet_health`, `get_grpc_health`, and `summarize_infrastructure_health` all return
 the same `assessment` + `assessmentReason` pair.
@@ -65,12 +71,29 @@ Metric names, per storage type (`cas_` / `ac_` prefix; `operation_rate` alone co
 | `cas_blob_size_{p50,p90,p99}` | bytes, average | CAS only; the AC stores fixed-shape messages |
 | `eviction_age` | hours, instant | Raw `min()` across the eviction-age rule |
 | `eviction_age_by_shard` | hours, instant | Per shard, in `labels.kubernetes_shard` |
-| `eviction_age_min_shard` | hours, derived | **The value the assessment uses** |
+| `eviction_age_min_shard` | hours, derived | **The value the assessment uses, and only when `eviction_observed_in_window` is true** |
+| `cas_blob_size_p50/p90/p99` | bytes, bucket_bound | **A histogram bucket boundary, not a measurement.** Quote the row's `lowerBound` and `upperBound` labels; when that bucket is wide the distribution simply cannot be resolved more precisely |
+| `cas_blob_size_buckets` | count, per `le` | The raw cumulative histogram, if you want the shape rather than a percentile |
+| `eviction_observed_in_window` | boolean, derived | Whether any block was discarded inside the query window. `false` means the eviction age carries no retention evidence |
+| `device_io_utilization` | ratio, node-level | Fraction of wall time the block device was busy. Near 1 the disk is the constraint whatever capacity remains |
+| `device_write_latency` | milliseconds, node-level | Device write service time. A storage `put` latency climbing while error rates stay at zero looks like this from underneath |
+| `device_write_throughput` | bytes_per_second, node-level | Bytes written to the device |
+| `device_queue_depth` | count, node-level | In-flight device requests |
 | `hash_{get_too_many_attempts,put_too_many_iterations,put_ignored_invalid}` | ops/sec, peak | Key-location-map saturation |
 | `eviction_set_ops` | ops/sec, instant | Eviction-set activity by service and cache name. The recording rule is named `rate1h`, but that names the rule's lookback, not the result's unit — it is a per-second rate like every other rate row here, and reading it as per-hour overstates eviction pressure 3600-fold. It carries no `storage_type` dimension, so `storageType` does not restrict it and it stays cluster-wide |
 
 Two reading caveats:
 
+- **Never read a blob-size percentile as a size.** The buckets are exponentially spaced and the
+  server reports the bucket rather than interpolating inside it, because interpolation once
+  produced a p90 of 180MB for a build whose entire output was 41 GiB. If a size claim matters,
+  cross-check it against the build's own reported output volume before acting on it.
+- **The `device_` rows describe the node, not the store.** They come from node metrics for the
+  nodes hosting the storage pods, so they cover everything scheduled onto those nodes and are
+  shared-infrastructure evidence rather than one tenant's. They are absent when the deployment
+  does not grant Pod reads, in which case the payload says so. They are the rows that separate
+  "the cache is too small" from "the disk cannot absorb the writes" — a question the storage
+  rows alone cannot answer.
 - **Prefer `eviction_age_min_shard` over `eviction_age`.** The recording rule can carry
   series with no `kubernetes_shard` label, and `min()` will happily return one. On a live
   cluster a shardless series read 8 minutes while every real shard read 67 to 107 hours.
@@ -85,9 +108,17 @@ Two reading caveats:
   gauges keep their zeros, because there zero is the answer.
 
 **How to assess if storage is undersized**:
-1. `eviction_age_min_shard` — the age of the youngest data ever evicted, i.e. how long a blob
-   is guaranteed to survive. Keep it comfortably above the longest build and use the
-   deployment's alert thresholds when classifying severity.
+1. `eviction_age_min_shard`, **but only when `eviction_observed_in_window` is `true`.** The row
+   is derived from `last_removed_old_block_insertion_time`: the age of the data in the most
+   recently *discarded* block. It is an event watermark, not a retention figure — while nothing
+   is being discarded it simply grows, so an idle store reports a large, meaningless value, and
+   under heavy writes it collapses to the instantaneous churn rate. One store read 0.44 hours
+   during a burst of builds and 15.5 hours fifteen hours later, with a build in between served
+   almost entirely from cache off the population written *before* the low reading. The server
+   now judges retention only when a block was actually evicted inside the window and says so in
+   `assessmentReason`; when it was not, treat retention as unknown and query a window that
+   contains real write activity. When it is judged, keep it comfortably above the interval
+   between builds that should share cache, not merely above one build's duration.
 2. `get_cache_trends`: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
 3. Hash-table **saturation rates** (not counts) — any sustained nonzero
    `hash_put_too_many_iterations` or `hash_get_too_many_attempts` means the key-location map
