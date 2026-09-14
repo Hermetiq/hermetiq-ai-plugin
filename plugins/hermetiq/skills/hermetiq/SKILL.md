@@ -143,7 +143,7 @@ path, `search_buildbarn_config_schema` for discovery,
 `list_buildbarn_config_roots` for service roots. A field's reported type is the
 message name without its package, so distinct messages collapse to one label and
 the type string is not itself a valid `fqn` — resolve one from
-`nestedMessage.fqn` at `depth` 1 or higher, or with
+`nested_message.fqn` at `depth` 1 or higher, or with
 `search_buildbarn_config_schema`, before calling
 `describe_buildbarn_config_type` on it.
 
