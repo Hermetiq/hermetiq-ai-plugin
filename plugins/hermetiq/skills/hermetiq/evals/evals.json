@@ -27,6 +27,7 @@
       "BUILD_ID",
       "INVOCATION_ID",
       "FAILURE_INVOCATION_ID",
+      "SIZECLASS_PROBE_INVOCATION_ID",
       "REMOTE_EXEC_INVOCATION_ID",
       "LOCAL_INVOCATION_ID",
       "CONFIG_SET_NAME",
@@ -96,9 +97,20 @@
       "expectedMcpSequence": ["find_actions", "get_action_execution"],
       "expectedFirstCall": {"tool": "find_actions", "arguments": {"invocationId": "${FAILURE_INVOCATION_ID}", "result": "failed"}},
       "maximumUnnecessaryCalls": 0,
-      "expectedBehavior": ["passes only returned action IDs to get_action_execution"],
+      "expectedBehavior": ["reads data.aggregations before paging individual rows", "passes only returned action IDs to get_action_execution"],
       "evidence": ["cites returned stderr, status, or failure detail"],
       "expectedFinalPatterns": ["worker|hardlinking|failed"]
+    },
+    {
+      "id": "size-class-probe-not-a-failure",
+      "category": "action_drilldown",
+      "prompt": "Use the Hermetiq skill. Analyze the failing actions in invocation ${SIZECLASS_PROBE_INVOCATION_ID}.",
+      "expectedMcpSequence": ["find_actions", "get_invocation"],
+      "expectedFirstCall": {"tool": "find_actions", "arguments": {"invocationId": "${SIZECLASS_PROBE_INVOCATION_ID}", "result": "failed"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["reads data.aggregations instead of paging every row", "does not call get_action_execution when the failure signature is uniform", "checks the invocation status before calling anything a build failure", "reports that the invocation succeeded"],
+      "evidence": ["cites byStatusCode DEADLINE_EXCEEDED and the durationStats min/max clamp", "cites supersededBySuccessfulAttempt on the failed rows"],
+      "expectedFinalPatterns": ["superseded|retried|size.?class|timeout", "success|not a (build )?failure|no actual failures"]
     },
     {
       "id": "failed-test-drilldown",

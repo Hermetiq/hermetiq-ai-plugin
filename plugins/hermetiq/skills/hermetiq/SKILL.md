@@ -306,7 +306,7 @@ context and likewise are not tool calls.
 | Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop when those three calls answer the request |
 | Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` and `get_worker_scaling_timeline` when listed |
 | Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
-| Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")`, `get_action_execution` |
+| Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")` — read `data.aggregations` and `supersededBySuccessfulAttempt` before any row, then `get_action_execution` only when the failure signatures are mixed |
 | Build failure output / "what did Bazel actually print?" | `get_build_logs` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
 | Failed or flaky tests | `get_test_results(includeLogs=true)`, then read `data.summary` (`failedCount`, `flakyCount`, `timeoutCount`, `passedCount`) | one call per verdict — `get_test_results(status="failed")`, `="flaky"`, `="timeout"` — then `get_test_trends`, `get_test_timing`, `get_failed_action_trends`, `get_flaky_action_trends` |
@@ -413,6 +413,22 @@ so a package prefix selects every target beneath it, while `mnemonic` is exact
 and case-sensitive; `workerNode` and `strategyTerms` are honoured or rejected
 rather than ignored; and `offset` pages correctly past the first page. Pass each
 row's `id` (not `seqNum`) to `get_action_execution`.
+
+Read `data.aggregations` before paging rows. It describes the whole filtered set
+rather than the returned page, so it answers how many failed and whether they share
+one cause without reading a single row. `byStatusCode` carries each gRPC code with
+its canonical name; `durationStats` reporting a min and max that agree to the second
+is a configured timeout rather than that many independent failures; and
+`data.aggregations.source` names the table that served the page, because the
+Bazel-reported actions record no gRPC status and no worker, so `byStatusCode` and
+`byWorkerPod` are legitimately empty there rather than unobserved. Drill into
+`get_action_execution` only when the signatures are mixed.
+
+A row whose `supersededBySuccessfulAttempt` is `true` failed and was then retried to
+success at the same action digest, which Buildbarn does when a smaller size class
+times out. Such a row is not a build failure, and an invocation whose failed rows are
+all superseded can still report `status: "success"` — check the invocation's own
+status before describing any of them as failures.
 
 Use `get_profile_trends` for project or time-window questions about Bazel JSON
 trace profiles. Default to `lookback="7d"` unless the user asks otherwise.
@@ -775,7 +791,16 @@ For a known invocation ID:
 5. Use `get_failed_action_trends` or `get_flaky_action_trends` for project-wide patterns.
 6. Check infrastructure only when failure timing or error messages point to remote
    execution, worker, storage, or network issues.
-7. Classify the failure before blaming the code. If failed actions' stderr shows a
+7. Classify the failure before blaming the code, and rule out a retried timeout
+   first. Read `data.aggregations` before any row: it describes the whole filtered
+   set rather than the page. Rows with empty stderr whose `byStatusCode` is a single
+   gRPC `4` (`DEADLINE_EXCEEDED`) and whose `durationStats` min and max agree to the
+   second were killed by a configured timeout, not by the code — Buildbarn probes an
+   action on the smallest size class and retries it larger. Any row reporting
+   `supersededBySuccessfulAttempt: true` already succeeded at the same digest and is
+   not a failure at all, so an invocation full of them can still have succeeded.
+   Check `get_invocation` `data.invocation.status` before reporting a failure.
+   Otherwise, if failed actions' stderr shows a
    dynamic loader or exec error rather than a compiler or test diagnostic —
    `version 'GLIBC_x.y' not found`, `cannot open shared object file`, `cannot execute
    binary file`, a missing ELF interpreter, or a missing interpreter such as
@@ -788,6 +813,15 @@ For a known invocation ID:
 For remote actions that fail because they executed in the wrong userspace. The tell is a
 dynamic loader or exec error instead of a compiler/test diagnostic. Do not report these as
 code bugs, flakes, or resource exhaustion.
+
+**This is not the playbook when stderr is empty.** Size-class timeouts share this
+playbook's headline signature — failures confined to one toolchain's mnemonics while
+others succeed remotely — but they are not an environment problem. Check
+`data.aggregations` first: a single `byStatusCode` of gRPC `4` (`DEADLINE_EXCEEDED`), a
+`durationStats` min and max that agree to the second, failures confined to the smaller
+size class, or any row with `supersededBySuccessfulAttempt: true` means Buildbarn timed
+the action out and retried it larger. A loader error in stderr means this playbook; a
+uniform duration clamp means a timeout, and you should stop here.
 
 1. Fix the failure class. `get_invocation` — record `data.invocation.status` first,
    then `data.invocation.exitCode`, `data.invocation.exitCodeName`, and
