@@ -38,18 +38,16 @@ Read these only when the user needs the deeper detail:
 
 ## Use the Server Prompts
 
-The Hermetiq MCP server ships 19 prompts, and each one is the tested, version-locked
-contract for a whole investigation: the call order, the branch conditions, the stop rules,
-and the caveats that keep a figure honest. They are the same recipes this skill describes,
-maintained on the server where they are pinned and regression-tested rather than restated
-by hand. **When a prompt covers the user's question, its wording is authoritative and this
-skill is the summary** — where the two ever disagree, follow the prompt.
+The server defines 19 workflow prompts, gated by deployment capabilities. Use a matching
+prompt when the client exposes MCP prompt retrieval. `prompts/get` renders instructions; it
+does not execute the investigation. Clients without a prompt bridge can follow the workflows
+in this skill directly. Do not claim that prompt retrieval or execution is universally impossible,
+or that a local source template is the deployed prompt.
 
-You cannot invoke a prompt yourself; the user runs it as a slash command. So when a request
-maps cleanly onto one, say so in a line and carry on answering — do not stop and wait:
-
-> This maps onto the `analyze_invocation` prompt, which runs the full bounded flow. I will
-> follow the same sequence here.
+The connected tool schema and observed evidence take precedence over stale prompt wording.
+Check the server version and available fields before following a template; absent aggregates,
+resources or optional fields remain unavailable rather than fabricated. A prompt match does
+not require waiting for the user to invoke a slash command.
 
 The Intent to Tool Map below names the prompt for each intent that has one. Intents with no
 prompt — build configuration audit, filter discovery, ad-hoc target questions — are served
@@ -76,8 +74,8 @@ an envelope field.
 
 The catalog is deployment-aware:
 
-- `select_project` requires shared storage for the selection, so it is absent in
-  deployments without it. When absent, use the server-resolved project and
+- `select_project` can appear on Cloud or on-prem deployments. Discover it from
+  the connected catalog. When absent, use the server-resolved project and
   report that project switching is unavailable only if the user asks to switch.
 - Cache-event detail tools may be disabled. When present, start with
   `group_cache_events`, then call `find_cache_events` only if groups exist.
@@ -86,7 +84,8 @@ The catalog is deployment-aware:
   server has Kubernetes access. `get_worker_scaling_timeline` additionally
   requires infrastructure metrics and appears only when both capabilities are
   available.
-- `list_buildbarn_events` and `get_buildbarn_pod_logs` require VictoriaLogs.
+- Check `list_buildbarn_events` and `get_buildbarn_pod_logs` independently; events
+  can be available when pod logs are not.
 - `get_cost_summary` is Cloud/OpenCost-only.
 - ConfigSet tools and Buildbarn schema tools are independently gated.
 
@@ -136,7 +135,8 @@ configuration correctness, and `data.findings` is frequently empty — a
 `data.status` of `files_discovered` with `data.findings: []` means "these files
 exist", not "this storage is healthy". Never report empty findings as a clean
 audit. The separate `buildbarn://guides/storage-model` resource explains the
-storage model.
+storage model when the client can retrieve MCP resources. If retrieval is unavailable,
+continue from schema/configuration evidence and disclose the missing reference.
 When schema tools are present, prefer `get_buildbarn_config_field` for a known
 path, `search_buildbarn_config_schema` for discovery,
 `describe_buildbarn_config_type` for one type, and
@@ -152,7 +152,7 @@ Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `test_failures`, `project_health`,
 `cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
 `profile_trends`, `rbe_trends`, `rbe_optimization`, `compare_periods`,
-`infra_health`, `analyze_storage_config`, and
+`infra_health`, `analyze_storage_config`, `storage_optimization`, and
 `setup_hermetiq_bazel`. Use a prompt when it matches the user's intent; otherwise
 call the tools directly. Their arguments are: `invocation_id` for
 `analyze_invocation`, `debug_cache_misses`, `diagnose_exec_environment`,
@@ -161,13 +161,40 @@ call the tools directly. Their arguments are: `invocation_id` for
 and `user` for `cache_trends`, `compare_periods`, `find_slow_builds`,
 `project_health`, `rbe_optimization`, `rbe_trends`, and `weekly_trends_report`
 (`profile_trends` adds `status`); `store` and `time_range` for
-`analyze_storage_config`; and `directory` for `setup_hermetiq_bazel`. The
+`analyze_storage_config`; `store` and `lookback` for `storage_optimization`; and `directory` for `setup_hermetiq_bazel`. The
 project-window prompts take `lookback`, not `time_range`, and no prompt takes
 `project_id` or `platform_name`.
 
 Prompts are user-selected workflow templates, not tools. A client may expose
 them separately from its tool picker. Resource URIs are application-controlled
 context and likewise are not tool calls.
+
+### Contract changes in server 0.19.0
+
+- Identity exposure is configurable: `MCP_EXPOSE_USER_IDENTITIES=false` is the default
+  and yields opaque user IDs. On-prem operators can opt in to names/emails. Do not
+  infer identities from opaque IDs or promise that every deployment hides them.
+- `get_action_execution.actionIds` accepts the decimal string IDs returned by
+  `find_actions`; never coerce 64-bit identifiers through a floating-point number.
+- `get_invocation_trends` supplies richer per-invocation BEP strategy/outcome fields;
+  `get_build_metrics_trends` supplies Bazel metrics across a window. Use
+  `get_remote_action_timing` with a returned exact, case-sensitive mnemonic and
+  supported phase. No matching timing rows means unavailable evidence, not zero
+  execution or queue time; discover observed mnemonic spellings from
+  `get_remote_action_trends`.
+  `get_hermetiq_setup` supplies selected-project setup, subject to shared-demo denial.
+- ConfigSet read tools (`get_config_set`, `list_config_sets`, `get_config_set_history`,
+  `diff_config_set_commits`, `list_config_maps`, `export_config_map_yaml`) inspect
+  drafts/versioned source. Redacted output marked `inspectionOnly` or `contentRedacted`
+  cannot be reapplied as a complete configuration. Oversized documents fail instead of
+  returning a silently cut export. `RENDER_FAILED` and `SCHEMA_UNKNOWN` are distinct
+  from `VALIDATION_FAILED`; only `VALIDATED_PASS` proves requested schema validation.
+- Infrastructure event and pod-log pages use `offset`/`nextOffset` with the same
+  invocation and filters. Read `coverageLimitations`; no events does not prove no
+  scaling. Coarse worker timelines can miss changes between samples.
+- Missing `failureMessage`, retry metadata or aggregates is unavailable evidence.
+  A failed test can have no failed action row. Inspect test verdicts and bounded logs;
+  an artifact URL alone is not the underlying failure text.
 
 ## Project, Build, and Invocation Context
 
@@ -183,11 +210,12 @@ context and likewise are not tool calls.
   Call it only when the user explicitly asks to switch or clear the current
   selection. Use `list_my_projects` to resolve an authorized ID when needed;
   ask a follow-up only when the requested name is genuinely ambiguous. The
-  target must be readable and have MCP access enabled. On-prem read access does
+  target must be readable and accepted by the server; `list_my_projects` does not
+  expose an MCP-enabled flag, so do not infer eligibility from its presence alone. On-prem read access does
   not require a physical membership row.
 - **Selection is sticky and account-wide.** A successful choice applies to later
   calls, reconnects, and other conversations for the authenticated user until
-  its 12-hour expiry. Pass an empty `projectId` to clear it and return to default
+  changed or cleared; selections have no time-based expiry. Pass an empty `projectId` to clear it and return to default
   resolution. Say which project is now active after an explicit switch, but do
   not repeatedly reconfirm it during later analysis.
 - **When `select_project` is absent from `tools/list`**, the deployment cannot
@@ -196,13 +224,13 @@ context and likewise are not tool calls.
   no alternate header-based MCP override.
 - **Default resolution is deterministic and requires no confirmation.** On-prem
   uses the deployment's project marked `is_default`; Cloud uses the user's
-  normal membership-derived default. An expired, deleted, inaccessible, or
+  normal membership-derived default. A deleted, inaccessible, or
   MCP-disabled sticky selection falls back to that default without requiring a
   new choice from the user.
 - Prefer `list_builds` for user-facing history because it groups attempts by
   `buildId`. Use `list_invocations` when you need one attempt.
-- Read each invocation's `status`, never its `exitCode`. `status` is always
-  present and is `success`, `failed`, `interrupted`, `in_progress`, or
+- Prefer each invocation's `status` over interpreting a missing exit code. Current
+  invocation tools expose it; older timeseries servers may not. When present it is `success`, `failed`, `interrupted`, `in_progress`, or
   `unknown`; `unknown` means the invocation ended with no recorded exit code.
   `exitCode` is absent, not 0, whenever the backend recorded none. No `status`
   filter can select `unknown`, so a filtered count can add up to less than the
@@ -279,7 +307,10 @@ context and likewise are not tool calls.
   it), `includeLogs`, `includeMnemonicDayHeatmap` (`get_cache_trends`),
   `includeUnmounted` (`get_buildbarn_config`, `analyze_buildbarn_storage`),
   `includeAllFields` (`list_buildbarn_events`, `get_buildbarn_pod_logs`),
-  `bucketSeconds`, and `forceRaw`.
+  `bucketSeconds`, and `forceRaw`. Follow the listed enums for reason, store,
+  sortBy and other closed vocabularies; schema traversal depth is 0 through 3.
+  Accepted aliases remain tool-specific, including passed/failure for action
+  results and asc/desc sort order; do not invent an alias on a different tool.
 - Use `find_cache_events(includeMissAnalysis=true)` for actionable miss reasons.
   `includeMissAnalysis` belongs to `find_cache_events` only —
   `group_cache_events` does not accept the field and rejects it.
@@ -318,11 +349,11 @@ context and likewise are not tool calls.
 | Cost reduction | `get_remote_action_trends(lookback="30d")` | `analyze_remote_execution`, `get_cost_summary` |
 | Remote action detail | `group_remote_actions` | `find_remote_actions`, `get_remote_action_command` |
 | Target trends | `get_target_trends` | `get_target_trend_detail`, `list_targets` |
-| Filter discovery | `list_filter_values` | Supported `field` values are `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status`, `tag`, `user`; patterns are intentionally not exposed for high-cardinality lookup. `field="status"` is the exception — it returns the static status vocabulary rather than values observed in the window, so it carries no counts and no `effectiveWindow`, and every value it lists is accepted by `list_builds` and `list_invocations` |
+| Filter discovery | `list_filter_values` | Supported `field` values are `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status`, `tag`, `user`; patterns are intentionally not exposed for high-cardinality lookup. `field="status"` returns lowercase values with `scope="static_vocabulary"`; `field="tag"` returns structured `tags[]` with key/values, `fieldName="tag"`, and `scope="project"`. Both omit counts and `effectiveWindow` and reject `includeCounts=true`; they are not windowed facets. Every returned status value is accepted by `list_builds` and `list_invocations` |
 | Project activity | `get_project_activity` | `summarize_project_trends`, `summarize_build_history` |
 | Build configuration audit | `list_invocations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`, `find_cache_events` |
 | Storage configuration audit / sizing | `analyze_buildbarn_storage` (or `get_buildbarn_config` only if present) | `get_storage_health`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
-| "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Four rows carry the tuning signal and each points at a different cause: `eviction_age_min_shard` (capacity, not correctness), `hash_get_too_many_attempts` and `hash_put_too_many_iterations` (key-location map sized below the object count), and the `cas_`/`ac_error_rate_pct` pair, which are the only rows meaning something is broken rather than small — quote the operation counts beside them, because a near-idle store shows an alarming ratio over a handful of requests. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say the configuration is adequate for the observed load. The `storage_optimization` prompt runs this end to end |
+| "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Four rows carry the tuning signal and each points at a different cause: `eviction_age_min_shard` (historical insertion age, not proof of current retention), `hash_get_too_many_attempts` and `hash_put_too_many_iterations` (key-location map sized below the object count), and the `cas_`/`ac_error_rate_pct` pair, which are the only rows meaning something is broken rather than small — quote the operation counts beside them, because a near-idle store shows an alarming ratio over a handful of requests. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say the configuration is adequate for the observed load. The `storage_optimization` prompt runs this end to end |
 | Hermetiq setup | `setup_hermetiq_bazel` prompt | Local `.bazelrc` follow-up only when the client has file access and the user approves edits |
 
 For cache, remote action, and target analysis, start grouped, then drill down:
@@ -380,8 +411,8 @@ mnemonics, phases, or flags.
   both unreachable. Present the largest credible single win, reconcile the claims
   against the invocation's actual wall time before quoting any total, and never
   add two percentages together.
-- Group by pillar: `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, and
-  `PROFILE_QUALITY`.
+- Group by the MCP pillar values: `bazel_flags`, `build_graph`, `rules`,
+  `infrastructure`, and `profile_quality`. Affected item kinds are lowercase too.
 - Surface caveats. They are part of the server-side confidence model.
 - Validate the top insights before presenting them as findings. Use
   `affectedItems` to call the smallest corroborating tool: `find_actions` for
@@ -412,13 +443,16 @@ Its `label`/`labelOperator` filters are case-insensitive **substring** matches,
 so a package prefix selects every target beneath it, while `mnemonic` is exact
 and case-sensitive; `workerNode` and `strategyTerms` are honoured or rejected
 rather than ignored; and `offset` pages correctly past the first page. Pass each
-row's `id` (not `seqNum`) to `get_action_execution`.
+row's decimal string `id` (not `seqNum`) to `get_action_execution`. A row missing
+`startTime` or `endTime` omits `duration` and reports `durationStatus="unavailable"`.
+Do not borrow a successful completed-action duration for a later BEP download failure.
 
-Read `data.aggregations` before paging rows. It describes the whole filtered set
+Read `data.aggregations` before paging rows when present. Older deployed servers
+may omit it; then page the rows and bound conclusions to the observed evidence. It describes the whole filtered set
 rather than the returned page, so it answers how many failed and whether they share
 one cause without reading a single row. `byStatusCode` carries each gRPC code with
 its canonical name; `durationStats` reporting a min and max that agree to the second
-is a configured timeout rather than that many independent failures; and
+suggests a timeout but does not establish its configuration or retry outcome; and
 `data.aggregations.source` names the table that served the page, because the
 Bazel-reported actions record no gRPC status and no worker, so `byStatusCode` and
 `byWorkerPod` are legitimately empty there rather than unobserved. Drill into
@@ -443,7 +477,7 @@ Interpret profile bottleneck labels as follows:
 | Bottleneck | Meaning | First action |
 |------------|---------|--------------|
 | `process_bound` | Remote worker time is dominated by running the action command itself, such as compile, link, test, or tool execution. It is not primarily queue, cache lookup, input fetch, upload, or output download time. | Inspect the affected critical-path actions and mnemonics; split large targets, shard long tests, tune compiler/linker/test flags, improve persistent workers, or use larger workers only when resource metrics show CPU or memory saturation. Adding more workers usually will not shorten one serial long action. |
-| `analysis_bound` | Bazel analysis or loading consumes a large share before useful action execution. | Trim target patterns, reduce macro/rule analysis work, avoid broad dependencies, and investigate rule implementations or repository setup. |
+| `analysis_bound` | Client analysis work is prominent in accumulated phase totals; it may overlap execution and does not establish wall-time dominance. | Trim target patterns, reduce macro/rule analysis work, avoid broad dependencies, and investigate rule implementations or repository setup. |
 | `queue_bound` | Actions spend significant time waiting for remote workers or scheduler capacity. | Check `analyze_remote_execution.data.queueWaitStats` and `get_scheduler_health`; scale or rebalance workers by platform. |
 | `fetch_bound` | Workers spend significant time fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker file-cache locality or virtual filesystem/prefetching, and check `get_storage_health`. |
 | `upload_bound` | Workers spend significant time uploading outputs. | Shrink generated outputs, remove unnecessary outputs, and check storage upload latency. |
@@ -490,7 +524,7 @@ Miss reason guidance:
 | `PLATFORM_CHANGED` | Execution platform properties changed | Standardize platforms and remote execution properties |
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
-| `CACHE_EVICTED` | Storage too small or retention too short | Read `eviction_age_min_shard` from `get_storage_health` and compare it to the longest build; size the disk and key-location map together |
+| `CACHE_EVICTED` | Storage too small or retention too short | Corroborate missing blobs and cache reuse intervals; insertion age alone cannot prove retention or eviction activity. Size disk and key-location map together only when capacity evidence supports it |
 | `NEVER_CACHED` | First observed action | Usually expected for new code or targets |
 | `INSUFFICIENT_TRACKED_HISTORY` | The tracked lookback did not reach far enough back to see a prior entry | Widen the comparison window before treating the miss as new work |
 | `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Not classifications: the miss was never classified, is still queued for enrichment, or enrichment gave up | Report the window as unclassified and assign no cause. None of these is accepted as a `reason` filter |
@@ -681,10 +715,14 @@ For a known invocation ID:
 1. Call `get_invocation(includeCommandLine=true)` and
    `get_invocation_insights`. Record duration/status, cache and remote-execution
    counts, `data.invocation.remoteExecutionEnabled`, profile bottleneck evidence,
-   and insight caveats. Inspect the outer `truncated`/`truncatedFields` plus
+   and insight caveats. If status is failed/interrupted, diagnose with
+   `find_actions(result="failed")`, `get_build_logs`, and (for test commands)
+   `get_test_results` before performance advice; no action rows does not imply no failure.
+   Inspect the outer `truncated`/`truncatedFields` plus
    `data.commandLineTruncated`.
 2. Resolve the last effective `--jobs` flag from the returned command-line
-   arrays. Use a numeric value only when the command line is complete. Treat an
+   effective `data.commandLine.command` array, not unstructured defaults. Use a
+   numeric value only when the command line is complete. Treat an
    absent flag as `auto`, and a missing, truncated, `auto`, or formula value as
    an unknown numeric ceiling.
 3. When `summarize_cache_events` is listed, call it and report hit count, miss
@@ -710,20 +748,24 @@ For a known invocation ID:
    Correlate queue depth/duration, executing and queued rates, and platform or
    size-class breakdown over its returned start/end window. This is a padded,
    shared project window, so label it corroborating rather than invocation-owned.
+   Repeat with `platform` set to a returned exact `platformQueueKey` for the affected
+   pool when available; unfiltered reductions can hide that pool's queue wait.
    Its executing gauge is neither worker slots/replicas nor directly comparable
    to the remote-action concurrency timeline. When it is absent, say scheduler
    telemetry is unavailable. When completed action logging is off, lower
    confidence because scheduler data cannot be paired with the remote-action
    timeline.
 7. When `get_worker_scaling_timeline` is listed and capacity arrived late is a
-   live hypothesis, call it with the same `invocationId`. Align its desired,
+   live hypothesis (material queue wait or a late ramp), call it with the same
+   `invocationId` even when the --jobs ceiling is unknown. Align its desired,
    available, and ready replica series with the invocation-owned queue and
    concurrency timeline. If those series are absent or incomplete, or the tool
    reports scale events unavailable, do not upgrade the hypothesis. When
    `data.scaleEventsStatus` is `available_separately` and
    `list_buildbarn_events` is listed, call it with the same `invocationId` and
-   correlate events against the replica timestamps without claiming that a
-   nearby event caused the replica change.
+   page with `nextOffset` while `hasMore` is true. Correlate events against
+   replica timestamps without claiming that a nearby event caused the change;
+   report sampling/coverage limits and unread pages.
 8. Classify the evidence with the Parallelism and Critical Path matrix. High
    queueing plus low executing parallelism supports worker/scheduler capacity;
    low queueing plus low parallelism supports the graph or lack of ready work.
@@ -746,8 +788,9 @@ For a known invocation ID:
 4. Group by reason and map to fixes.
 5. Estimate impact and rank by savings divided by effort.
 6. If `CACHE_EVICTED` is significant, call `get_storage_health` and read
-   `eviction_age_min_shard` against the longest build in the window. Eviction age above the
-   longest build means eviction is not the constraint and the misses have another cause.
+   `eviction_age_min_shard` as historical insertion-age context only. It does not
+   prove a discard happened in the window or rule out eviction. Compare reuse
+   intervals only when independent discard/retention evidence exists.
 
 ### Regression This Week
 
@@ -792,7 +835,8 @@ For a known invocation ID:
 6. Check infrastructure only when failure timing or error messages point to remote
    execution, worker, storage, or network issues.
 7. Classify the failure before blaming the code, and rule out a retried timeout
-   first. Read `data.aggregations` before any row: it describes the whole filtered
+   first. Read `data.aggregations` before any row when present (otherwise disclose
+   the absent aggregate and use paged rows): it describes the whole filtered
    set rather than the page. Rows with empty stderr whose `byStatusCode` is a single
    gRPC `4` (`DEADLINE_EXCEEDED`) and whose `durationStats` min and max agree to the
    second were killed by a configured timeout, not by the code — Buildbarn probes an
@@ -817,7 +861,7 @@ code bugs, flakes, or resource exhaustion.
 **This is not the playbook when stderr is empty.** Size-class timeouts share this
 playbook's headline signature — failures confined to one toolchain's mnemonics while
 others succeed remotely — but they are not an environment problem. Check
-`data.aggregations` first: a single `byStatusCode` of gRPC `4` (`DEADLINE_EXCEEDED`), a
+`data.aggregations` first when present; older servers may omit it. A single `byStatusCode` of gRPC `4` (`DEADLINE_EXCEEDED`), a
 `durationStats` min and max that agree to the second, failures confined to the smaller
 size class, or any row with `supersededBySuccessfulAttempt: true` means Buildbarn timed
 the action out and retried it larger. A loader error in stderr means this playbook; a
@@ -856,12 +900,11 @@ uniform duration clamp means a timeout, and you should stop here.
    the image is fixed by moving the image, not by downgrading the toolchain.
 5. Establish what actually executed. The `container-image` property is only a scheduler
    matching key — Buildbarn never pulls it. The real userspace is the pool's **runner**
-   container image, which `list_worker_pools` returns in `data.pools[].images[]`. Each pool
-   lists both containers from the worker Deployment: the `ghcr.io/buildbarn/bb-worker` image
-   and the runner image beside it. The runner is the non-`bb-worker` entry and is the one
-   that supplies glibc — for example a pool listing `bb-worker` alongside
-   `ghcr.io/catthehacker/ubuntu:act-22.04` executes actions against Ubuntu 22.04 userspace.
-   `list_worker_pools` is a current snapshot, so for an older invocation confirm the image
+   container image. Prefer `list_rbe_workers` or `get_rbe_worker`: `runnerImage`
+   identifies the runner explicitly, while `imagePlatformPinning` describes pinning.
+   The mixed `list_worker_pools.images` array can include Docker sidecars; do not
+   guess the runner by excluding bb-worker. These tools are current snapshots,
+   so for an older invocation confirm the image
    has not changed since. Compare base OS and glibc against what the action requested. The glibc table is in
    `references/REFERENCE.md` under bb-runner; a binary needing `GLIBC_2.34` cannot run on
    any glibc 2.31 image.
@@ -880,7 +923,8 @@ uniform duration clamp means a timeout, and you should stop here.
    that must move together — advertised worker properties, scheduler routes keyed on the
    same value, autoscaler platform selectors — per the Platform Queue Management section of
    `references/infrastructure-tuning.md`. Label which facts came from Hermetiq telemetry and
-   which came from the operator, since the runner image is not MCP-observable.
+   which came from the operator; current runner-image observations do not establish
+   which image produced an older cached result.
 
 ### Build Configuration Audit
 
@@ -921,9 +965,14 @@ uniform duration clamp means a timeout, and you should stop here.
    establishes that it is the deployed source. Never choose an arbitrary listed
    ConfigSet and describe it as active. Without one of those sources, stop and
    report that active configuration access is unavailable.
-2. Corroborate with `get_storage_health(timeRange="24h")` or the user's supported window.
+2. When `get_storage_health` is listed, corroborate CAS/AC with
+   `get_storage_health(timeRange="24h")` or the user's supported window. If absent,
+   or the store focus is ISCC/FSAC, state runtime health unavailable and keep
+   the assessment to configuration evidence.
    Read `data.assessment` and `data.metrics[]` (`name`, `labels`, `value`, `unit`,
-   `aggregation`). Retention comes from `eviction_age_min_shard`, hash-table pressure from
+   `aggregation`). `evictionActivity` and `retentionAssessment` remain unknown
+   without a discard counter/timestamp; `eviction_age_min_shard` is insertion age, not
+   current retention. Read hash-table pressure from
    the `hash_*` rows, and blob sizes from `cas_blob_size_*`. Use `eviction_age_min_shard`
    rather than `eviction_age`, and treat a tens-of-megabytes blob-size p50 as a histogram
    bucket artifact rather than a real median. `references/infrastructure-tuning.md` has the
@@ -938,8 +987,9 @@ uniform duration clamp means a timeout, and you should stop here.
    sizing tables.
 5. Where the ConfigSets tools are present in tools/list (git-managed Buildbarn
    config), preview a change with `render_config_file`, review history
-   with `diff_config_set_commits`, and propose the fix with `create_config_set_pull_request`. When
-   they are absent, present the recommended jsonnet values for the operator to apply.
+   with `diff_config_set_commits`, and present the proposed Jsonnet change for review.
+   Mutations such as `save_config_set` require authorization for that specific change.
+   When these tools are absent, present the recommended values for the operator.
 6. Report per store: current facts, issues with severity and confidence, and the
    concrete recommended values.
 
@@ -952,11 +1002,11 @@ uniform duration clamp means a timeout, and you should stop here.
 - If a capability is absent from `tools/list`, state that it is unavailable in
   this deployment. Do not call it and do not imply that a metrics tool can
   replace a configuration, log, Kubernetes, or cost capability.
-- `import_config_map_yaml`, `save_config_set`, and
-  `create_config_set_pull_request` are mutations. Before any call, the host must
-  display the server-authorized project, exact ConfigSet/files/version and side
-  effects, then obtain immediate human confirmation. Never infer confirmation
-  from an earlier message and never set `confirmMutation=true` yourself.
+- `import_config_map_yaml` and `save_config_set` are mutations. Review the
+  server-authorized project, exact ConfigSet/files/version and side effects.
+  Proceed only within the user's explicit authorization for that concrete change;
+  preserve authorization already provided in the conversation. Supply
+  `confirmMutation=true` only for the authorized reviewed mutation.
 - An unconfirmed mutation request gets no mutation tool call. Explain the exact
   review/confirmation step that is still required.
 - After confirmation, pass a unique `requestId`, the approved `reason`, and the

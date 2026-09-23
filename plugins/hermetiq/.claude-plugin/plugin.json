@@ -1,6 +1,6 @@
 {
   "name": "hermetiq",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Bazel build optimization skill powered by Hermetiq analytics",
   "author": {
     "name": "Hermetiq",

@@ -27,17 +27,30 @@
   `forceRaw=true` only for narrow exact/debug reads.
 - `list_filter_values` is the only public filter-discovery facade. It intentionally excludes
   high-cardinality pattern type-ahead; do not synthesize an internal lookup tool.
+  `field="status"` returns lowercase `values[]`, `fieldName="status"`, and
+  `scope="static_vocabulary"`. `field="tag"` preserves structured `tags[]` with
+  key/values, `fieldName="tag"`, and `scope="project"`. These two branches have no
+  counts or effectiveWindow, reject `includeCounts=true`, and must not be
+  interpreted as facets of the requested time window.
 - Prefer stable aggregation tools (`analyze_remote_execution`, `get_remote_action_trends`) for
   transfer and timing bottlenecks before drilling into individual `find_remote_actions` records.
 - `find_actions` reads the Bazel-reported action stream, which in practice records only
   failures, so `result="success"` legitimately returns 0 rows on a build that executed
-  thousands of actions. Use `find_remote_actions` for successful remote executions. `label`
+  thousands of actions. Use `find_remote_actions` for successful remote executions.
+  In `find_actions` and `get_action_execution`, missing startTime/endTime means
+  duration is omitted with `durationStatus="unavailable"`. A successful Buildbarn
+  execution can precede a Bazel download failure; its time is not that failure
+  event's measured duration. `label`
   is a case-insensitive substring match while `mnemonic` is exact and case-sensitive.
 - `list_targets` describes the build phase only (Bazel's `TargetComplete` event): a target
   that built but whose test run failed is `success` with no `failureDetail` and is excluded
   by `result="failed"`. Use `find_actions` or `get_test_results` for test outcomes.
 - When prompt orchestration is unavailable in a client, use direct tool-call equivalents from
   the skill playbooks.
+- `MCP_EXPOSE_USER_IDENTITIES=false` defaults analytics identities to opaque IDs and
+  omits ConfigSet history `authorId`, whose legacy values can be email addresses.
+  This identity policy does not remove customer-authored `extVars` or label keys
+  named `email` or `userDisplayName`; source and log text have separate redaction.
 
 ---
 
@@ -70,6 +83,8 @@ Key fields for optimization analysis:
 - `remoteCacheEnabled` / `remoteExecutionEnabled` — Whether remote cache and remote execution were enabled
 - `remoteCacheHits` / `totalExecutions` — Quick cache signal from the invocation summary
 - `internalExecutions` / `localExecutions` / `remoteExecutions` — Execution strategy breakdown
+  on invocation detail/richer trends; `list_invocations` omits internalExecutions,
+  so its rows cannot reconstruct the non-internal overview denominator.
 - `diskCacheHits` — Actions served from local disk cache without checking remote
 - `criticalPathLog` / `processStatsLog` — Raw critical path (the longest chain of sequential dependencies) and basic process stats logs (semi-structured text)
 - `profile` — Parsed Bazel JSON trace profile summary, including wall-time anatomy,
@@ -187,7 +202,7 @@ the current typed insight schema when only the action plan is needed.
 
 `get_invocation_insights` returns typed records under `data.insights`:
 - `insightId` — stable key for dedupe and per-rule links.
-- `pillar` — `BAZEL_FLAGS`, `BUILD_GRAPH`, `RULES`, `INFRASTRUCTURE`, or `PROFILE_QUALITY`.
+- `pillar` — `bazel_flags`, `build_graph`, `rules`, `infrastructure`, or `profile_quality`.
 - `title`, `summary`, `recommendation` — user-facing copy.
 - `estimatedSavings.percentOfWallTime`, `estimatedSavings.seconds`,
   `estimatedSavings.humanReadable` — present on almost no insight now. The rules that priced
@@ -198,7 +213,7 @@ the current typed insight schema when only the action plan is needed.
   reason means the profile was analyzed and nothing was flagged; an empty list *with* one is not
   a clean bill of health.
 - `caveats` — uncertainty notes that must be surfaced with the recommendation.
-- `affectedItems` — typed pointers (`ACTION`, `TARGET`, `MNEMONIC`, `PHASE`, `FLAG`) with an
+- `affectedItems` — typed pointers (`action`, `target`, `mnemonic`, `phase`, `flag`) with an
   optional metric label and duration. Use these to choose drill-down calls.
 
 Insight workflow:
@@ -230,7 +245,7 @@ Profile bottleneck glossary:
 | `bottleneckKind` | Definition | Actionable follow-up |
 |-------------------|------------|----------------------|
 | `process_bound` | Remote worker time is mostly spent running the action process itself. In Bazel terms, the command inside the sandbox, such as compiler, linker, test runner, or codegen tool, is the long pole rather than queueing, input fetch, cache checks, uploads, or output download. | Inspect related actions and mnemonics; split large targets, shard long tests, improve persistent workers, tune compiler/linker/test flags, or use larger workers only when resource signals show CPU or memory saturation. More workers usually will not shorten one serial action. |
-| `analysis_bound` | Bazel loading/analysis dominates before action execution. | Trim broad target patterns, reduce macro/rule analysis work, simplify dependency fanout, and investigate expensive repository or rule setup. |
+| `analysis_bound` | Client analysis work is prominent in accumulated phase totals; it may overlap execution and does not establish wall-time dominance. | Trim broad target patterns, reduce macro/rule analysis work, simplify dependency fanout, and investigate expensive repository or rule setup. |
 | `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `analyze_remote_execution.data.queueWaitStats` and `get_scheduler_health`; scale or rebalance workers for the affected platform. |
 | `fetch_bound` | Workers spend a large share fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker cache locality or virtual filesystem/prefetching, and check storage latency. |
 | `upload_bound` | Workers spend a large share uploading outputs. | Shrink outputs, avoid unnecessary declared outputs, and check storage upload health. |
@@ -244,8 +259,9 @@ Profile bottleneck glossary:
 ## Hermetiq Aggregated Analytics
 
 ### Build History (logical build grouping)
-- `list_builds` — grouped build rows with primary invocation, attempt counts, status rollups,
-  cache/execution totals, and pagination. Each `BuildSummary` row (also used by build-detail
+- `list_builds` — grouped build rows with latest invocation, attempt counts, status
+  rollups, and pagination. Strategy counts inside latestInvocation describe that
+  attempt, not sums across the logical build. Each `BuildSummary` row (also used by build-detail
   surfaces) exposes `invocationCount`, `successCount`, `failureCount`, `interruptedCount`,
   `inProgressCount`, and `unknownCount`; those five outcome counters account for every attempt.
 - `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` with exactly
@@ -323,14 +339,16 @@ set. The public request supports `lookback`, `pattern`, `repository`, `branch`, 
 `users`, `statuses`, and `forceRaw`.
 
 Response fields are under `data` and use proto-JSON camelCase:
-- `summary.totalBuilds` / `summary.buildsWithProfile` — profile coverage. Low coverage means
+- `summary.buildsWithProfile` / `summary.totalBuilds` — profile coverage using the
+  same query's finished-invocation denominator. Low coverage means
   profile conclusions are conditional.
 - `summary.avgBuildWallTimeMicros`, `avgExecutionWallMicros`, and `avgActionTotalMicros` —
   build time anatomy and effective action parallelism.
-- `summary.avgAnalysisWallMicros` and `summary.analysisMicrosSum` always read 0, and `analysis`
-  is absent from `phaseTrends`. The underlying column means different things depending on which
-  profile phase markers a capture carried, so the server suppresses these rather than publish a
-  wrong figure. For per-invocation analysis time use `data.profile.analysisSeconds` from
+- The `analysis_unavailable` entry in `diagnostics[]` explains that
+  `summary.avgAnalysisWallMicros`, `summary.analysisMicrosSum`, and the bucket
+  equivalents contain numeric zero placeholders, not measured zero durations;
+  `analysis` is absent from `phaseTrends`. Retained profiles mix marker spans,
+  time-to-first-action, and concurrent analysis work, so these trends are suppressed. For per-invocation analysis time use `data.profile.analysisSeconds` from
   `get_invocation`, which comes from Bazel's own timing metrics.
 - `summary.remoteQueueMicrosSum`, `remoteFetchMicrosSum`,
   `remoteProcessMicrosSum`, `remoteUploadMicrosSum`,
@@ -360,6 +378,18 @@ Profile trend workflow:
 5. Pair with `get_critical_path_trends`, `get_remote_action_trends`, `get_cache_trends`, or
    infrastructure tools only when those tools test a specific profile-derived hypothesis.
 
+### Rate and timing conventions
+
+- `summarize_project_trends.coreMetrics.cacheHitRate`, `successRate`, and
+  `remoteEnabledRate` use percentages (0–100). `buildCountChange` and
+  `durationChange` are relative percentage changes, omitted without a valid baseline.
+- `get_test_trends.cacheHitRate` and `failureRate` use percentages (0–100).
+  `failureRateChange` is a percentage-point difference. Use `cacheableRunCount`
+  as the cache-hit denominator; absent comparisons are unavailable, not zero.
+- `get_remote_action_timing` requires an exact case-sensitive mnemonic and
+  supported phase. Discover mnemonic spellings with `get_remote_action_trends`;
+  no matching timing rows is not evidence of zero queue or execution time.
+
 ### Project-Level Action and Activity Tools
 
 These tools are scoped to the authenticated project by the server. Their public inputs use a
@@ -368,13 +398,13 @@ project override or protobuf request object.
 
 - `get_project_activity` — high-level project activity counts and trends. Use for "how active is
   this project?" overview cards and for sanity-checking whether a project is still in use before
-  recommending optimizations.
+  recommending optimizations. `publishCountBuckets` is project-only telemetry and
+  cannot honor invocation filters; other breakdowns apply the requested filters.
 - `get_failed_action_trends` — top failed actions, daily failure counts, failure-detail breakdown,
   failure novelty, and aborted reasons. Use for project-wide failure pattern analysis when a
   single-build view (`find_actions(result="failed")`) is insufficient.
-- `get_flaky_action_trends` — flakiest actions across the project. Loaded asynchronously by dashboards
-  because the analysis is more expensive than the standard failure rollup. Use for the FLAKY
-  bucket in test-failure investigations.
+- `get_flaky_action_trends` — actions with mixed execution outcomes. This is not
+  test flakiness; use `get_test_trends` and `get_test_results(status="flaky")` for tests.
 
 ---
 
@@ -393,7 +423,9 @@ Queried via the infrastructure tools, scoped to a build's time window (±2 minut
 ### Worker Fleet Metrics
 - Operation rates (executions per second)
 - Execution stage timing: queued, input-fetch, execution, output-upload
-- CPU utilization (per worker, per platform)
+- CPU user/system p90 rows are action CPU seconds, not utilization percentages.
+  Follow the returned unit; CPU efficiency percentages require measured CPU/wall
+  duration and a clearly defined action population.
 - Memory utilization and pressure
 - I/O throughput (block operations)
 - File pool statistics
@@ -403,7 +435,8 @@ Queried via the infrastructure tools, scoped to a build's time window (±2 minut
 - Latency percentiles per operation type (50th, 90th, 99th)
 - Error rates by operation
 - Blob size distribution
-- Disk eviction age (how long objects survive before eviction)
+- Disk eviction insertion age (historical block data; current discard activity
+  and retention remain unknown without an independent counter/timestamp)
 - Hash table occupancy and health
 - Eviction rates over time
 
@@ -726,7 +759,7 @@ Hermetiq ships 50+ recording rules for Buildbarn metrics, named
 - `backend_type_kubernetes_service_operation_storage_type:buildbarn_blobstore_blob_access_operations_started:irate1m` — operation rates by type and backend
 - `backend_type_kubernetes_service_le_operation_storage_type:buildbarn_blobstore_blob_access_operations_duration_seconds_bucket:irate1m` — latency distribution
 - `storage_type:buildbarn_blobstore_hashing_key_location_map_put_too_many_iterations:irate1m` and `...get_too_many_attempts:irate1m` — key-location-map saturation (any sustained nonzero rate = undersized map)
-- `kubernetes_shard_storage_type:buildbarn_blobstore_old_current_new_location_blob_map_last_removed_old_block_insertion_time_seconds:min` — worst-case retention per shard (the eviction-age signal behind get_storage_health)
+- `kubernetes_shard_storage_type:buildbarn_blobstore_old_current_new_location_blob_map_last_removed_old_block_insertion_time_seconds:min` — insertion age of the last discarded block per shard (not its discard timestamp)
 
 **Scheduler rules**:
 - `instance_name_prefix_platform_size_class:buildbarn_builder_in_memory_build_queue_tasks_queued:sum` / `:executing:sum` / `:completed:sum` — queue depth by platform and size class
