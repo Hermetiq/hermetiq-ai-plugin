@@ -1,5 +1,5 @@
 {
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "057a68e68f00f5c429cbf38d591a7477aa8f2a6c",
-  "sha256": "99b9a6241b55bff28acc4353a2c805630c1c3a35017f69f645fe13610be3e25e"
+  "sourceRevision": "07badf7ff57015f3170b326f04f391d78d9096bd-working-tree",
+  "sha256": "938e14f98db394034955779856eb4bef55228afea11f06ee5cc82ec862581258"
 }

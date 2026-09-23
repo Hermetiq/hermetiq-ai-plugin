@@ -34,6 +34,24 @@ fi
 
 VERSION="$1"
 
+# Resolve a path that need not exist yet, symlinks included. BSD realpath (macOS)
+# has no GNU `-m`, so walk to the nearest existing ancestor and re-append the rest.
+canonicalize_path() {
+  local path="$1" parent base
+  if [[ -d "$path" ]]; then
+    ( cd "$path" && pwd -P )
+    return
+  fi
+  parent="$(dirname -- "$path")"
+  base="$(basename -- "$path")"
+  parent="$(canonicalize_path "$parent")"
+  if [[ "$parent" == "/" ]]; then
+    printf '%s\n' "/$base"
+  else
+    printf '%s\n' "$parent/$base"
+  fi
+}
+
 RELEASE_TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 if [[ ! "$VERSION" =~ $RELEASE_TAG_PATTERN ]]; then
   echo "error: version must be a valid release tag such as v0.9.6-beta" >&2
@@ -79,8 +97,8 @@ if [[ -L "$STAGE_DIR" ]]; then
   echo "error: refusing to recreate path because stage path is a symlink: $STAGE_DIR" >&2
   exit 1
 fi
-CANONICAL_TMP_ROOT="$(realpath -m -- "$TMP_ROOT")"
-CANONICAL_STAGE_DIR="$(realpath -m -- "$STAGE_DIR")"
+CANONICAL_TMP_ROOT="$(canonicalize_path "$TMP_ROOT")"
+CANONICAL_STAGE_DIR="$(canonicalize_path "$STAGE_DIR")"
 EXPECTED_CANONICAL_STAGE="$CANONICAL_TMP_ROOT/release-$VERSION"
 if [[ "$CANONICAL_STAGE_DIR" != "$EXPECTED_CANONICAL_STAGE" ]]; then
   echo "error: refusing to recreate stage path outside $CANONICAL_TMP_ROOT: $CANONICAL_STAGE_DIR" >&2
@@ -88,7 +106,9 @@ if [[ "$CANONICAL_STAGE_DIR" != "$EXPECTED_CANONICAL_STAGE" ]]; then
 fi
 if [[ -e "$STAGE_DIR" ]]; then
   echo "Recreating existing stage directory: $STAGE_DIR"
-  find "$STAGE_DIR" -mindepth 1 -maxdepth 2 -printf '  %P\n' | sort
+  # BSD find has no GNU `-printf`, so list relative paths from inside the stage dir.
+  ( cd "$STAGE_DIR" && find . -mindepth 1 -maxdepth 2 -print ) \
+    | sed 's|^\./|  |' | sort
 fi
 rm -rf -- "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"

@@ -47,9 +47,9 @@ there rather than forwarding their name as a `storageType`. The payload exposes 
 row carries `name`, `labels`, `value`, `unit`, and `aggregation`.
 
 `data.assessment` is `healthy`, `degraded`, `critical`, or `no_data`, computed server-side
-from eviction age *when an eviction was observed in the window*, the **worse of
-`cas_error_rate_pct` and `ac_error_rate_pct`**, and key-location-map pressure. Error rate and
-key-location-map pressure are judged regardless; retention is not. `data.assessmentReason` names the rows, values, and thresholds it
+from the **worse of `cas_error_rate_pct` and `ac_error_rate_pct`** and
+key-location-map pressure. `evictionActivity` and `retentionAssessment` are unknown
+without a discard counter/timestamp; insertion age cannot establish either. `data.assessmentReason` names the rows, values, and thresholds it
 used — quote it with the verdict rather than the verdict alone. `get_scheduler_health`,
 `get_worker_fleet_health`, `get_grpc_health`, and `summarize_infrastructure_health` all return
 the same `assessment` + `assessmentReason` pair.
@@ -71,10 +71,10 @@ Metric names, per storage type (`cas_` / `ac_` prefix; `operation_rate` alone co
 | `cas_blob_size_{p50,p90,p99}` | bytes, average | CAS only; the AC stores fixed-shape messages |
 | `eviction_age` | hours, instant | Raw `min()` across the eviction-age rule |
 | `eviction_age_by_shard` | hours, instant | Per shard, in `labels.kubernetes_shard` |
-| `eviction_age_min_shard` | hours, derived | **The value the assessment uses, and only when `eviction_observed_in_window` is true** |
+| `eviction_age_min_shard` | hours, derived | Minimum shard insertion age; historical context, not a current retention verdict |
 | `cas_blob_size_p50/p90/p99` | bytes, bucket_bound | **A histogram bucket boundary, not a measurement.** Quote the row's `lowerBound` and `upperBound` labels; when that bucket is wide the distribution simply cannot be resolved more precisely |
 | `cas_blob_size_buckets` | count, per `le` | The raw cumulative histogram, if you want the shape rather than a percentile |
-| `eviction_observed_in_window` | boolean, derived | Whether any block was discarded inside the query window. `false` means the eviction age carries no retention evidence |
+| `evictionActivity` / `retentionAssessment` | status | Unknown without a discard counter/timestamp. The older eviction_observed_in_window age-versus-window heuristic was invalid |
 | `device_io_utilization` | ratio, node-level | Fraction of wall time the block device was busy. Near 1 the disk is the constraint whatever capacity remains |
 | `device_write_latency` | milliseconds, node-level | Device write service time. A storage `put` latency climbing while error rates stay at zero looks like this from underneath |
 | `device_write_throughput` | bytes_per_second, node-level | Bytes written to the device |
@@ -108,17 +108,13 @@ Two reading caveats:
   gauges keep their zeros, because there zero is the answer.
 
 **How to assess if storage is undersized**:
-1. `eviction_age_min_shard`, **but only when `eviction_observed_in_window` is `true`.** The row
-   is derived from `last_removed_old_block_insertion_time`: the age of the data in the most
-   recently *discarded* block. It is an event watermark, not a retention figure — while nothing
-   is being discarded it simply grows, so an idle store reports a large, meaningless value, and
-   under heavy writes it collapses to the instantaneous churn rate. One store read 0.44 hours
-   during a burst of builds and 15.5 hours fifteen hours later, with a build in between served
-   almost entirely from cache off the population written *before* the low reading. The server
-   now judges retention only when a block was actually evicted inside the window and says so in
-   `assessmentReason`; when it was not, treat retention as unknown and query a window that
-   contains real write activity. When it is judged, keep it comfortably above the interval
-   between builds that should share cache, not merely above one build's duration.
+1. `eviction_age_min_shard` is derived from `last_removed_old_block_insertion_time`:
+   the insertion age of the data in the last discarded block. A seven-day-old block
+   discarded a minute ago does not say when the discard happened. The old
+   eviction_observed_in_window flag compared age with window length and was invalid.
+   Treat eviction activity and current retention as unknown without a discard
+   counter/timestamp. Independent evidence should cover the cache reuse interval,
+   not merely one build's duration; insertion age alone cannot size the store.
 2. `get_cache_trends`: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
 3. Hash-table **saturation rates** (not counts) — any sustained nonzero
    `hash_put_too_many_iterations` or `hash_get_too_many_attempts` means the key-location map
@@ -129,10 +125,7 @@ Two reading caveats:
 
 | Signal | State | Recommendation |
 |--------|-------|----------------|
-| Eviction age < 1 hour | Critical | Grow the disk (and key-location map) now or add a storage shard |
-| Eviction age 1-4 hours | Degraded | Increase disk by 50%; monitor trend |
-| Eviction age 4-24 hours | Watch | Below the 24h alert threshold; plan growth |
-| Eviction age > 24 hours and above your longest build | Healthy | No change needed |
+| Insertion age alone, high or low | Retention unknown | Establish actual discard activity and reuse demand before sizing |
 | Any nonzero hash-table saturation rate | Key-location map undersized | Grow entries/`sizeMi` (bb-storage auto-rounds the count to a prime); grow the memory request for in-memory maps |
 | High FindMissing rates | Clients re-checking existence | Enable existence caching on frontend |
 
@@ -190,9 +183,10 @@ The `concurrency` setting controls parallel actions per worker. Must match avail
 and memory.
 
 **How to assess**:
-1. `get_worker_fleet_health`: CPU utilization per worker.
-   - Consistently >85% → concurrency too high, actions contend for CPU.
-   - Consistently <50% → concurrency too low, worker capacity wasted.
+1. `get_worker_fleet_health`: read the units. CPU-user/system p90 rows measure
+   per-action seconds, not utilization; do not apply 85%/50% thresholds to them.
+   Use measured CPU/wall efficiency plus queueing and resource pressure before
+   changing concurrency.
 2. `list_buildbarn_events`: out-of-memory kills → concurrency × per-action memory exceeds limit.
    Records come back newest first with `hasMore` reporting whether older matches in the window
    were left out, so raise `limit` or narrow `timeRange` rather than concluding from a full page.
@@ -369,7 +363,7 @@ When builds get slower and the cause is not cache-related or code-related:
 |--------|-----------|--------|-----------------|
 | Queue wait 90th percentile > 10 seconds | Sustained over 1 hour | Add workers for affected platform | Reduces queue wait proportional to workers added |
 | Eviction age < 4 hours | Sustained trend | Increase disk and key-location map together, or add a storage shard | Reduces `CACHE_EVICTED` misses |
-| Worker CPU > 85% | Sustained during builds | Reduce worker concurrency or add workers | Reduces execution time variance |
+| Measured CPU saturation plus action contention | Sustained during comparable builds; CPU seconds alone are insufficient | Validate worker concurrency and capacity | Can reduce execution time variance |
 | Worker memory > 80% | With out-of-memory kills | Increase worker memory limits | Eliminates out-of-memory action failures |
 | Storage Get 90th percentile > 100 milliseconds | Sustained | Increase key_location_map; check disk I/O | Reduces input fetch and cache lookup times |
 | Service mesh error rate > 1% | Any sustained period | Investigate specific error codes | Reduces action failures and retries |

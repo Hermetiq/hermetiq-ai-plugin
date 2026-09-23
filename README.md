@@ -100,10 +100,10 @@ switches only when the user explicitly requests it. Optional capabilities are
 absent from `tools/list` when unavailable, and the skill will say so instead of
 substituting unrelated evidence.
 
-ConfigSet changes require a separate host-visible confirmation immediately
-before `import_config_map_yaml`, `save_config_set`, or
-`create_config_set_pull_request`. The skill never infers confirmation or retries
-an ambiguous mutation blindly.
+ConfigSet changes through `import_config_map_yaml` or `save_config_set` require
+explicit authorization for the reviewed project, files, version, and side effects.
+The skill preserves authorization already given and never retries an ambiguous
+mutation blindly.
 
 ## Install in Claude Desktop
 
