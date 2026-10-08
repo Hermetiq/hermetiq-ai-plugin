@@ -710,6 +710,17 @@ For an opaque build ID, preserve the bounded flow:
 `get_invocation_insights`. Stop when those calls provide the duration/status and
 a supported recommendation.
 
+For the slowest builds in a window, follow the `find_slow_builds` prompt: page
+`list_builds` with `nextCursor` while `hasMore` is true and rank the fetched
+rows yourself, because they are ordered newest first. Rank only rows that report
+`durationSeconds` and whose `latestInvocation` has a terminal status. A build's
+`durationSeconds` runs from its first attempt's start to its last attempt's
+finish, so it includes any gap between retries; `latestInvocation.durationSeconds`
+is one attempt's runtime. Then explain the slowest build without asking first:
+run the known-invocation flow below on its `latestInvocation.invocationId`, and
+when `get_invocation_insights` returns `data.noInsightsReason`, report it and
+explain from `get_invocation` instead.
+
 For a known invocation ID:
 
 1. Call `get_invocation(includeCommandLine=true)` and
