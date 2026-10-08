@@ -264,11 +264,17 @@ Profile bottleneck glossary:
   attempt, not sums across the logical build. Each `BuildSummary` row (also used by build-detail
   surfaces) exposes `invocationCount`, `successCount`, `failureCount`, `interruptedCount`,
   `inProgressCount`, and `unknownCount`; those five outcome counters account for every attempt.
-- `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` with exactly
-  `totalBuildCount`, `successCount`, `failureCount`, `interruptedCount`, and
+- `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` whose counters are
+  exactly `totalBuildCount`, `successCount`, `failureCount`, `interruptedCount`, and
   `inProgressCount`. It has neither `unknownCount` nor `invocationCount`, so do not apply the
-  per-build five-counter invariant to this response. Its outcome counters can sum below
-  `totalBuildCount` when a logical build has only unknown attempts.
+  per-build five-counter invariant to this response. It counts each logical build once, by
+  its latest attempt in the window, so its outcome counters sum below `totalBuildCount`
+  when that latest attempt finished without an exit code.
+- `list_builds` and `summarize_build_history` read live invocation rows by invocation start
+  time and return `data.effectiveWindow`: `dataFreshThrough` equals `effectiveEndTime` and
+  `complete` is true. `list_builds` freezes its window on the first page, so every later page
+  reports that same window. It returns no window total; take the window's build count from
+  `summarize_build_history`'s `totalBuildCount` after checking that the two windows align.
 - `get_build_timeseries` — build counts bucketed by time with build-level status rollups.
 - These tools expose bounded filters directly and keep aggregation semantics server-owned.
 
