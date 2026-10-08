@@ -315,6 +315,7 @@ For a known invocation with remote execution enabled:
 | Low executing parallelism + low queueing | Graph, lack of ready remote work, or a long action is likely limiting |
 | Low executing parallelism + high queue duration/depth | Scheduler/worker capacity is likely limiting; the scheduler executing gauge corroborates activity but does not quantify slots |
 | Long initial queue + fixed low concurrency plateau + later stepwise ramp | Capacity arrived late; slow autoscaling is plausible |
+| Scheduler `scaling_lag`: a p99 queue tail without backlog while the serving pool's ready replicas trailed its desired replicas | Capacity arrived late in that window; `scaleUp.phases` says whether nodes or image pulls are the delay |
 | One worker handles most actions while several others handle only a small tail | Later worker participation supports the late-capacity hypothesis |
 
 The last two patterns do not prove autoscaler behavior. `list_worker_pools` is a
@@ -325,6 +326,18 @@ controller scale-event timeline, to show capacity arriving after queue growth
 before stating that an autoscaler reacted slowly. If that history is unavailable,
 keep capacity arrival as a hypothesis and recommend instrumenting the scale
 decision, pod scheduling, image pull, and readiness timeline separately.
+
+When `get_scheduler_health` reports `scaling_lag`, `platformAssessments[].scaleUp.phases`
+already splits a scale-up into those parts, from the pool's own pod events. Fix the phase
+that dominates rather than the worker count:
+
+| Dominant phase | What it means | Remedies |
+|----------------|---------------|----------|
+| Node wait (`nodeWaitMedianSeconds`) | New pods were unschedulable until the cluster autoscaler added a node | Keep warm node headroom on the worker node pool: low-priority placeholder pods that real workers preempt, or a node-pool minimum during working hours; a higher pool `minReplicas` holds warm workers at the cost of idle capacity |
+| Image pull (`imagePullMedianSeconds`, `slowestImage`) | Each new node pulled the runner image cold | Preload the image on worker nodes (a pre-pull DaemonSet, or the cloud's node-image or secondary-disk preload on GKE, EKS, or AKS), serve it from a registry close to the cluster with lazy or streamed pulls where supported, or slim the runner image |
+| Startup (`startupMedianSeconds` well above the pull) | Containers were slow to start after their images arrived | Inspect init containers and the worker's readiness with `list_buildbarn_events` and `get_buildbarn_pod_logs` |
+
+More workers or a higher maximum do not shorten any of these phases.
 
 Keep causality partitioned in the report: Action Cache misses explain why work
 had to execute, queue metrics explain delay before execution, and execution
