@@ -612,7 +612,12 @@ capacity or graph limit — do not run the matrix below on an empty series.
 Never call slow autoscaling proven from scheduler aggregates, remote-action
 parallelism, or `list_worker_pools`. Proving controller delay requires a
 time-aligned desired/available/ready replica or scale-event timeline showing
-capacity arriving after queue growth. Without it, capacity arrival and slow
+capacity arriving after queue growth. A scheduler `scaling_lag` verdict is that
+replica evidence for its window: it is measured from the serving pool's desired
+and ready replica history, with pod event phases when available. It shows the
+platform's tail and the pool's late scale-ups in the same window, not that every
+waiting action waited for those replicas, so an invocation-owned queue timeline
+still decides a single build. Without it, capacity arrival and slow
 autoscaling remain hypotheses. When `get_worker_scaling_timeline` is listed,
 call it with the invocation ID and require its time-aligned desired, available,
 and ready series before upgrading the conclusion. Its `data.metrics[].points`
@@ -640,11 +645,25 @@ component:
 | Component | Assessment values |
 |-----------|-------------------|
 | Storage, gRPC | `healthy`, `degraded`, `critical` |
-| Scheduler | `healthy`, `congested`, `saturated` |
+| Scheduler | `healthy`, `congested`, `saturated`, `tail_latency`, `scaling_lag` |
 | Workers | `healthy`, `idle`, `stressed`, `overloaded` |
 
 Any component may return `no_data`, which means the telemetry is absent — not that the
 component is idle or well.
+
+The scheduler judges backlog and tail separately. `congested` and `saturated` are a backlog:
+sampled queue depth or the p90 wait. A p99 wait above 10 seconds with no backlog is
+`tail_latency`: a minority of actions waited while the queue drained normally. When the pool
+serving that platform added workers late, the verdict is `scaling_lag` instead, and that
+platform's `platformAssessments[].scaleUp` carries the evidence: how often the pool's desired
+replicas rose, how long its ready replicas trailed them (`readyLagMedianSeconds`,
+`readyLagMaxSeconds`, measured to `stepSeconds`), and, when Kubernetes events are available,
+`phases`: the median time new pods waited for a node, their slowest image pull, and Scheduled to
+last container started. Both verdicts count as `degraded` in the summary, never `critical`.
+Report `scaling_lag` as capacity arriving late, not a saturated scheduler, and name the phase
+that dominates: a node wait calls for warm node headroom, an image pull for preloading or
+slimming the runner image. Do not recommend more workers or a higher maximum for a tail that
+late capacity explains; see `references/infrastructure-tuning.md`.
 
 `idle` means the worker fleet did no work and nothing was queued — a quiet cluster, not a
 problem. A fleet with zero throughput **while the scheduler queue is non-empty** reports
@@ -676,8 +695,8 @@ remote-action concurrency and not a count of available worker slots or replicas.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
-| High queue time | `get_scheduler_health` | `scheduler_queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown` | Scale or rebalance workers |
-| Suspected late capacity | `get_worker_scaling_timeline` | time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
+| High queue time | `get_scheduler_health` | `scheduler_queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown`, `platformAssessments[].scaleUp` | `congested` or `saturated`: scale or rebalance workers. `scaling_lag`: fix capacity arrival from `scaleUp.phases` (node headroom or image pulls) rather than adding workers |
+| Suspected late capacity | `get_scheduler_health` `scaling_lag`, then `get_worker_scaling_timeline` | `scaleUp` lag and phases; time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
 | Unknown or unverified deployment shape | `get_buildbarn_status` | `data.status`, `data.assessment`, `data.chart`, `data.storageShards`, per-component `role`/`kind`/`readyReplicas`/`images` | Establish what is installed before reading metrics; `storageShards` is what per-shard storage series key on, so it separates a real shard from a worker-local cache series |
 | Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
 | Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
@@ -771,7 +790,10 @@ For a known invocation ID:
    `invocationId` even when the --jobs ceiling is unknown. Align its desired,
    available, and ready replica series with the invocation-owned queue and
    concurrency timeline. If those series are absent or incomplete, or the tool
-   reports scale events unavailable, do not upgrade the hypothesis. When
+   reports scale events unavailable, do not upgrade the hypothesis. When step 6
+   reported `scaling_lag` for the affected platform, its `scaleUp` already gives
+   the pool's lag and how new pods spent it; use this timeline and the events
+   below only to inspect a specific scale-up. When
    `data.scaleEventsStatus` is `available_separately` and
    `list_buildbarn_events` is listed, call it with the same `invocationId` and
    page with `nextOffset` while `hasMore` is true. Correlate events against
