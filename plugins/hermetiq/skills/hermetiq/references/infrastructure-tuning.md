@@ -36,19 +36,19 @@ eviction — when the oldest new block fills, the ranges rotate and the oldest o
 discarded whole. A fixed-size open-addressed hash table (the **key-location map**) indexes
 blob locations and never grows.
 
-**`get_storage_health` response shape** (pass `storageType: "cas"` or `"ac"` to filter;
-omit it to get both). Those two are the whole vocabulary and the schema enumerates them, so
-a value outside it is rejected before the call reaches the server. ISCC and FSAC are real
-Buildbarn stores that `analyze_buildbarn_storage` classifies, and they do emit block-eviction
-telemetry — but not the operation, error and latency rows a health verdict is built from, so
-`get_storage_health` has no CAS/AC-equivalent answer for them: read their configuration and stop
-there rather than forwarding their name as a `storageType`. The payload exposes `data.projectId`, `data.start`, `data.end`,
+**`get_storage_health` response shape** (pass `storageType: "cas"`, `"ac"`, `"iscc"` or
+`"fsac"` to filter; omit it to get every store). Those four are the whole vocabulary and the
+schema enumerates them, so a value outside it is rejected before the call reaches the server.
+The initial size class cache (ISCC) and the file system access cache (FSAC) report the same
+operation, error and latency rows as CAS and AC, plus the share of their lookups that found an
+entry. The payload exposes `data.projectId`, `data.start`, `data.end`,
 `data.status`, `data.assessment`, `data.assessmentReason`, and `data.metrics[]`. Each metric
 row carries `name`, `labels`, `value`, `unit`, and `aggregation`.
 
 `data.assessment` is `healthy`, `degraded`, `critical`, or `no_data`, computed server-side
-from the **worse of `cas_error_rate_pct` and `ac_error_rate_pct`** and
-key-location-map pressure. `evictionActivity` and `retentionAssessment` are unknown
+from the **highest `<type>_error_rate_pct` among the stores that served operations** and
+key-location-map pressure; a store whose `<type>_operation_count` is zero has no error rate
+and is named in a note instead. `evictionActivity` and `retentionAssessment` are unknown
 without a discard counter/timestamp; insertion age cannot establish either. `data.assessmentReason` names the rows, values, and thresholds it
 used — quote it with the verdict rather than the verdict alone. `get_scheduler_health`,
 `get_worker_fleet_health`, `get_grpc_health`, and `summarize_infrastructure_health` all return
@@ -56,17 +56,21 @@ the same `assessment` + `assessmentReason` pair.
 
 **Never compare two metrics with different `aggregation` values.** `peak` is the highest
 1-minute rate in the window, `average` is the mean over it, `instant` is a gauge read at the
-window end, and `derived` is computed from other rows. A `peak` operation rate sits beside an
+window end, `total` is a count over the whole window, and `derived` is computed from other
+rows. A `peak` operation rate sits beside an
 `average` latency in the same payload and the two are not on the same scale.
 
-Metric names, per storage type (`cas_` / `ac_` prefix; `operation_rate` alone covers both):
+Metric names, per storage type (`cas_`, `ac_`, `iscc_` and `fsac_` prefixes; `operation_rate`
+alone covers every store):
 
 | Metric | Unit | Meaning |
 |--------|------|---------|
 | `operation_rate`, `<type>_operation_rate` | ops/sec, peak | Blob-access operations |
-| `<type>_operations_by_op` | ops/sec, peak | Same, split by `labels.operation` (Get, Put, FindMissing) |
-| `<type>_latency_{get,put,findmissing}_{p50,p90,p99}` | ms, average | Per-operation latency |
-| `<type>_error_rate_pct` | percent, derived | Excludes NotFound, Canceled, AlreadyExists — a NotFound on a CAS read is a cache miss, not a failure |
+| `<type>_operations_by_op` | ops/sec, peak | Same, split by `labels.operation` (Get, Put, FindMissing); a Get counts only when it found its blob |
+| `<type>_latency_{get,put,findmissing}_{p50,p90,p99}` | ms, average | Per-operation latency; ISCC and FSAC serve only Get and Put |
+| `<type>_error_rate_pct` | percent, derived | Excludes NotFound, Canceled, AlreadyExists — a NotFound is a cache miss on CAS or AC and an action not seen before on ISCC or FSAC, not a failure |
+| `iscc_get_count_by_code`, `fsac_get_count_by_code` | count, total | The window's Gets by `labels.grpc_code` |
+| `iscc_get_found_pct`, `fsac_get_found_pct` | percent, derived | OK / (OK + NotFound): the share of lookups that found an action's previous execution statistics (ISCC) or a file access profile to prefetch (FSAC). Never a verdict input or a sizing signal: a new action is always NotFound, and neither share measures time saved |
 | `<type>_operation_count`, `<type>_error_count` | ops/sec, average | The numerator and denominator behind the rate |
 | `cas_blob_size_{p50,p90,p99}` | bytes, average | CAS only; the AC stores fixed-shape messages |
 | `eviction_age` | hours, instant | Raw `min()` across the eviction-age rule |
