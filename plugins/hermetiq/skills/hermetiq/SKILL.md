@@ -998,10 +998,12 @@ uniform duration clamp means a timeout, and you should stop here.
    establishes that it is the deployed source. Never choose an arbitrary listed
    ConfigSet and describe it as active. Without one of those sources, stop and
    report that active configuration access is unavailable.
-2. When `get_storage_health` is listed, corroborate CAS/AC with
-   `get_storage_health(timeRange="24h")` or the user's supported window. If absent,
-   or the store focus is ISCC/FSAC, state runtime health unavailable and keep
-   the assessment to configuration evidence.
+2. When `get_storage_health` is listed, corroborate the stores with
+   `get_storage_health(timeRange="24h")` or the user's supported window, passing
+   `storageType` (`cas`, `ac`, `iscc` or `fsac`) for a store focus. If it is absent,
+   state runtime health unavailable and keep the assessment to configuration
+   evidence. `iscc_get_found_pct` and `fsac_get_found_pct` are lookup outcomes,
+   never failures or a sizing signal.
    Read `data.assessment` and `data.metrics[]` (`name`, `labels`, `value`, `unit`,
    `aggregation`). `evictionActivity` and `retentionAssessment` remain unknown
    without a discard counter/timestamp; `eviction_age_min_shard` is insertion age, not
