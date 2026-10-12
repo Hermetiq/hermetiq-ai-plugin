@@ -240,8 +240,8 @@ context and likewise are not tool calls.
   `invocationCount`: `successCount`, `failureCount`, `interruptedCount`,
   `inProgressCount`, and `unknownCount`. Never present the first four as the
   whole build. The aggregate `summarize_build_history` response is different:
-  it has `totalBuildCount` and the first four outcome counters, but no
-  `unknownCount` or `invocationCount`, so its counters can sum below the total.
+  it counts each logical build once, and its five outcome counters, including
+  `unknownCount`, sum to `totalBuildCount`; it has no `invocationCount`.
 - The `status` filter vocabulary for `list_builds`, `list_invocations`,
   `summarize_build_history`, `get_build_timeseries`,
   `summarize_invocation_timeseries`, and `get_invocation_timeseries` is
@@ -558,7 +558,7 @@ establishes action cost. None of those alone explains the other two.
 
 | Phase | Healthy | Warning | Critical | Usually means |
 |-------|---------|---------|----------|---------------|
-| Queue | <2s | 2-10s | >10s | Worker saturation |
+| Queue | <2s | 2-10s | >10s | Worker capacity or a late scale-up |
 | Input fetch | <5s | 5-30s | >30s | Large inputs or storage contention |
 | Execution | mnemonic-dependent | >2x median | >5x median | Slow action or resource contention |
 | Output upload | <5s | 5-20s | >20s | Large outputs or storage bottleneck |
@@ -612,10 +612,10 @@ capacity or graph limit — do not run the matrix below on an empty series.
 Never call slow autoscaling proven from scheduler aggregates, remote-action
 parallelism, or `list_worker_pools`. Proving controller delay requires a
 time-aligned desired/available/ready replica or scale-event timeline showing
-capacity arriving after queue growth. A scheduler `scaling_lag` verdict is that
-replica evidence for its window: it is measured from the serving pool's desired
-and ready replica history, with pod event phases when available. It shows the
-platform's tail and the pool's late scale-ups in the same window, not that every
+capacity arriving after queue growth. A scheduler pair's `scaleUp`, under any
+verdict, is that replica evidence for its window: it is measured from the serving
+pool's desired and ready replica history, with pod event phases when available. It
+shows the platform's waits and the pool's late scale-ups in the same window, not that every
 waiting action waited for those replicas, so an invocation-owned queue timeline
 still decides a single build. Without it, capacity arrival and slow
 autoscaling remain hypotheses. When `get_worker_scaling_timeline` is listed,
@@ -645,25 +645,83 @@ component:
 | Component | Assessment values |
 |-----------|-------------------|
 | Storage, gRPC | `healthy`, `degraded`, `critical` |
-| Scheduler | `healthy`, `congested`, `saturated`, `tail_latency`, `scaling_lag` |
+| Scheduler | `healthy`, `scaling_lag`, `tail_latency`, `congested`, `saturated`, `stalled` |
 | Workers | `healthy`, `idle`, `stressed`, `overloaded` |
 
 Any component may return `no_data`, which means the telemetry is absent — not that the
-component is idle or well.
+component is idle or well. The summary's overall `assessment` is the worst component on one
+shared scale:
 
-The scheduler judges backlog and tail separately. `congested` and `saturated` are a backlog:
-sampled queue depth or the p90 wait. A p99 wait above 10 seconds with no backlog is
-`tail_latency`: a minority of actions waited while the queue drained normally. When the pool
-serving that platform added workers late, the verdict is `scaling_lag` instead, and that
-platform's `platformAssessments[].scaleUp` carries the evidence: how often the pool's desired
-replicas rose, how long its ready replicas trailed them (`readyLagMedianSeconds`,
-`readyLagMaxSeconds`, measured to `stepSeconds`), and, when Kubernetes events are available,
-`phases`: the median time new pods waited for a node, their slowest image pull, and Scheduled to
-last container started. Both verdicts count as `degraded` in the summary, never `critical`.
-Report `scaling_lag` as capacity arriving late, not a saturated scheduler, and name the phase
-that dominates: a node wait calls for warm node headroom, an image pull for preloading or
-slimming the runner image. Do not recommend more workers or a higher maximum for a tail that
-late capacity explains; see `references/infrastructure-tuning.md`.
+| Overall | Component verdicts |
+|---------|--------------------|
+| `critical` | storage or gRPC `critical` (errors above 5%), workers `overloaded`, scheduler `stalled` |
+| `degraded` | scheduler `saturated`, `congested`, or `tail_latency`; workers `stressed`; storage or gRPC `degraded`; a component without telemetry |
+| `healthy` | `healthy`, `idle`, scheduler `scaling_lag` |
+
+The scheduler judges queue waits per platform/size-class pair, and its verdict is the worst
+pair in `platformAssessments[]`, or the fleet-wide waits when no pair is labeled. Queue depth
+(`scheduler_queue_depth`, `queueDepthPeak`) is context only: a burst that queued hundreds of
+actions and drained within minutes on short waits is `healthy`, so never call the scheduler
+saturated from depth.
+
+| Pair verdict | Rule |
+|--------------|------|
+| `stalled` | Some action stayed queued through a 10-minute stretch in which nothing executed for the pair |
+| `saturated` | p90 wait above 120 s, or some action stayed queued through a 10-minute stretch while work executed |
+| `congested` | p90 wait above 60 s |
+| `tail_latency` | p99 wait above 60 s with p90 at or below 60 s |
+| `scaling_lag` | A `tail_latency` that the serving pool's scale-up explains: ready within 10 minutes and not capacity-limited |
+| `healthy`, `idle` | Anything else; `idle` when nothing was queued or executed |
+
+Each pair names its serving `pool`. `backlogExcess` means at least that many actions stayed
+queued through a 10-minute stretch. `capacityLimited` means the pair's `executingPeak` reached
+`slotCeiling`, the pool's `maxReplicas` × concurrency: the pool ran every slot at its maximum.
+Whatever the verdict, a pair whose serving pool's ready replicas trailed a rise in its desired
+replicas carries `scaleUp`: how often the pool's desired replicas rose, how long its ready
+replicas trailed them (`readyLagMedianSeconds`, `readyLagMaxSeconds`, measured to
+`stepSeconds`; `slow` when the worst lag passed 10 minutes), and, when Kubernetes events are
+available, `phases`: the median time new pods waited for a node, their slowest image pull, and
+Scheduled to the last container's first start (a restart does not count). `podsTruncated`
+marks phases taken over a sample of the newest pods.
+
+Report `scaling_lag` as healthy: capacity arrived late and caught up, or, with
+`scaleUp.catchingUp`, was still arriving at the window's end within the 10 minutes. Name its dominant phase
+as the improvement, never more workers or a higher maximum: a node wait calls for warm node
+headroom, an image pull for preloading or slimming the runner image. A `congested` or
+`saturated` pair with `scaleUp`, typical of a pool scaling up from zero, keeps its verdict, and
+its `assessmentReason` adds that the pool also added workers late: name the dominant phase
+there too. Recommend more workers or a higher maximum only for a `capacityLimited` pair or a
+backlog that outlasted the scale-up. A `stalled` pair means no worker served it: check its pool
+in `list_worker_pools` and its platform properties; see `references/infrastructure-tuning.md`.
+
+`summarize_infrastructure_health` also returns `activity`. `mostly_idle` means executing
+actions averaged under half the worker slots (`slotUtilization`, `executingAverage` over
+`slotsAverage`) or, where slots are unmeasured, that most samples had nothing queued or
+executing (`idleShare`); otherwise it is `active`, or `unmeasured`. Activity never changes a
+verdict: report a mostly idle fleet beside its verdict, not in place of one.
+
+Judge autoscaling health from `list_worker_pools`, not from Kubernetes Warning events. A
+KEDA-scaled pool carries `scaledObject`, with KEDA's own `Ready`, `Active`, `Fallback`, and
+`Paused` `conditions` and the KEDA-owned HPA's `scalingActive`, and a Deployment that is not
+Available carries `unavailableSince`. Each needs attention only once it has persisted 10
+minutes by `snapshotAt`; shorter is a transition, and `paused` is a note:
+
+- an unavailable pool, aged by `unavailableSince`;
+- `scalingActive` False for `FailedGetExternalMetric` or `FailedGetObjectMetric`, aged by its
+  `lastTransitionTime`;
+- a ScaledObject in `Fallback`, aged by `metricFailures` × 15 s. KEDA sets no
+  `lastTransitionTime` on its own conditions, and it counts one failure per HPA metric read
+  (every 15 s by default), not per `pollingIntervalSeconds`. `Fallback` without
+  `metricFailures` still needs attention.
+
+A ScaledObject not `Ready` needs attention only when its pool is already in trouble (waits,
+availability, or a capacity ceiling): KEDA also sets `Ready` False on transient reconcile
+errors, so alone it is a note. `FailedScheduling` while nodes are added and KEDA reconcile
+errors are transient; pod failures such as out-of-memory kills are not. `FailedScaleUp` and
+`NotTriggerScaleUp` matter only when the same pool's waits or state corroborate them.
+`scaledObjects` `not_permitted` or `error` leaves the autoscaler state it could not read
+unknown, not healthy (KEDA's own conditions are still returned when only the HPA read failed);
+`unavailable` means the cluster runs no KEDA.
 
 `idle` means the worker fleet did no work and nothing was queued — a quiet cluster, not a
 problem. A fleet with zero throughput **while the scheduler queue is non-empty** reports
@@ -695,8 +753,9 @@ remote-action concurrency and not a count of available worker slots or replicas.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
-| High queue time | `get_scheduler_health` | `scheduler_queue_depth`, `queue_duration_{p50,p90,p99}`, `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown`, `platformAssessments[].scaleUp` | `congested` or `saturated`: scale or rebalance workers. `scaling_lag`: fix capacity arrival from `scaleUp.phases` (node headroom or image pulls) rather than adding workers |
-| Suspected late capacity | `get_scheduler_health` `scaling_lag`, then `get_worker_scaling_timeline` | `scaleUp` lag and phases; time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
+| High queue time | `get_scheduler_health` | `queue_duration_{p50,p90,p99}`, `platformAssessments[]` (`backlogExcess`, `capacityLimited`, `scaleUp`), `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown`; `scheduler_queue_depth` as context | `stalled`: find why no worker served the pair. `congested` or `saturated`: scale or rebalance workers, raising the maximum when `capacityLimited`; with `scaleUp`, also fix the dominant phase, since part of the wait was workers still arriving. `tail_latency` with `scaleUp.slow`: fix the dominant phase. `scaling_lag`: healthy; improve capacity arrival from `scaleUp.phases` (node headroom or image pulls) rather than adding workers |
+| Autoscaler errors or Warning events | `list_worker_pools` | `scaledObject.conditions`, `scaledObject.scalingActive`, `unavailableSince`, `snapshotAt`, `scaledObjects` | Act on a condition that has held 10 minutes or more; scheduling and KEDA Warning events alone are transient |
+| Suspected late capacity | `get_scheduler_health` `scaleUp` (any verdict), then `get_worker_scaling_timeline` | `scaleUp` lag and phases; time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
 | Unknown or unverified deployment shape | `get_buildbarn_status` | `data.status`, `data.assessment`, `data.chart`, `data.storageShards`, per-component `role`/`kind`/`readyReplicas`/`images` | Establish what is installed before reading metrics; `storageShards` is what per-shard storage series key on, so it separates a real shard from a worker-local cache series |
 | Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
 | Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
@@ -749,10 +808,11 @@ For a known invocation ID:
    `find_actions(result="failed")`, `get_build_logs`, and (for test commands)
    `get_test_results` before performance advice; no action rows does not imply no failure.
    Inspect the outer `truncated`/`truncatedFields` plus
-   `data.commandLineTruncated`.
+   `data.commandLine.commandTruncated` (the effective command array;
+   `unstructuredCommandTruncated` alone does not make `--jobs` unknown).
 2. Resolve the last effective `--jobs` flag from the returned command-line
    effective `data.commandLine.command` array, not unstructured defaults. Use a
-   numeric value only when the command line is complete. Treat an
+   numeric value only when that array is complete. Treat an
    absent flag as `auto`, and a missing, truncated, `auto`, or formula value as
    an unknown numeric ceiling.
 3. When `summarize_cache_events` is listed, call it and report hit count, miss
@@ -791,9 +851,9 @@ For a known invocation ID:
    available, and ready replica series with the invocation-owned queue and
    concurrency timeline. If those series are absent or incomplete, or the tool
    reports scale events unavailable, do not upgrade the hypothesis. When step 6
-   reported `scaling_lag` for the affected platform, its `scaleUp` already gives
-   the pool's lag and how new pods spent it; use this timeline and the events
-   below only to inspect a specific scale-up. When
+   returned `scaleUp` for the affected platform, whatever its verdict, it already
+   gives the pool's lag and how new pods spent it; use this timeline and the
+   events below only to inspect a specific scale-up. When
    `data.scaleEventsStatus` is `available_separately` and
    `list_buildbarn_events` is listed, call it with the same `invocationId` and
    page with `nextOffset` while `hasMore` is true. Correlate events against

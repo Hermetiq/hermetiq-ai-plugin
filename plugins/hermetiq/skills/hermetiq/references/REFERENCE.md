@@ -264,12 +264,11 @@ Profile bottleneck glossary:
   attempt, not sums across the logical build. Each `BuildSummary` row (also used by build-detail
   surfaces) exposes `invocationCount`, `successCount`, `failureCount`, `interruptedCount`,
   `inProgressCount`, and `unknownCount`; those five outcome counters account for every attempt.
-- `summarize_build_history` — an aggregate `BuildHistorySummaryResponse` whose counters are
-  exactly `totalBuildCount`, `successCount`, `failureCount`, `interruptedCount`, and
-  `inProgressCount`. It has neither `unknownCount` nor `invocationCount`, so do not apply the
-  per-build five-counter invariant to this response. It counts each logical build once, by
-  its latest attempt in the window, so its outcome counters sum below `totalBuildCount`
-  when that latest attempt finished without an exit code.
+- `summarize_build_history` — an aggregate response with `totalBuildCount`, `successCount`,
+  `failureCount`, `interruptedCount`, `inProgressCount`, and `unknownCount`. It counts each
+  logical build once, by its latest attempt in the window, and the five outcome counters sum
+  to `totalBuildCount`; `unknownCount` counts builds whose latest attempt finished without an
+  exit code. It has no `invocationCount`.
 - `list_builds` and `summarize_build_history` read live invocation rows by invocation start
   time and return `data.effectiveWindow`: `dataFreshThrough` equals `effectiveEndTime` and
   `complete` is true. `list_builds` freezes its window on the first page, so every later page
@@ -563,8 +562,13 @@ collection:
    block is recycled. Applies to `blocksOnBlockDevice` with file-backed *and* raw-device
    sources. Too few risks `No unused blocks available` write failures.
 
-**Key sizing formula**: `block size = blocks bytes / total_blocks`, and one block is the
-**maximum storable blob**. More than 100 total blocks is a startup failure.
+**Key sizing formula**: `block size = floor(blocks bytes / sector size / total_blocks) * sector size`,
+and one block is the **maximum storable blob**. The sector size is the host's
+`max(st_blksize, page size)` (4096 bytes in practice), and a file is rounded up to whole sectors.
+More than 100 total blocks is a startup failure. `analyze_buildbarn_storage` returns these values
+per store under `data.geometry.stores[]` (`blockSizeBytes`, `usableCapacityBytes`,
+`maximumBlobSizeBytes`, with `data.geometry.sectorSizeAssumption`); quote them rather than
+recomputing.
 
 **Key-location map configuration**:
 - `keyLocationMapMaximumGetAttempts`: 16 (recommended). Controls hash slot probes before
