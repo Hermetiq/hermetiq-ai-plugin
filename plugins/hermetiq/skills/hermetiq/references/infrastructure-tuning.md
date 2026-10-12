@@ -236,8 +236,12 @@ platform properties (operating system family, container image, instruction set a
 
 **Diagnosing platform issues**:
 1. `get_scheduler_health` shows per-platform breakdown
-2. One platform with high queue depth while others are idle → that platform is under-provisioned
-3. `platformQueueWithNoWorkersTimeout` (default 900 seconds) — queues with no workers are
+2. One platform with long queue waits (`queueP90Seconds`, `queueP99Seconds`) while others are
+   idle → that platform is under-provisioned or scaling late. Depth alone is not evidence: a
+   burst queues deep and drains within minutes
+3. A `stalled` platform → no worker served it for 10 minutes: its pool is at zero and not
+   scaling, unavailable, or advertising different platform properties
+4. `platformQueueWithNoWorkersTimeout` (default 900 seconds) — queues with no workers are
    removed after this duration
 
 **Platform identity is declared in several places and they must move together.** Matching is on the
@@ -250,7 +254,8 @@ deployment updates a platform value, every one of these needs the same edit:
   invocation key extractors, and size-class config — and a `static` platform key extractor on the
   default route can silently send the work to an entirely different pool)
 - any autoscaler query that selects on the serialized platform string; a stale selector reads zero
-  queue depth forever, so the pool never scales up on demand
+  queue depth forever, so the pool never scales up on demand, and a pool at zero leaves the
+  platform `stalled`
 
 Two failure signatures distinguish a property mismatch from an image mismatch:
 
@@ -317,27 +322,40 @@ For a known invocation with remote execution enabled:
 | Pattern | Supported conclusion |
 |---------|----------------------|
 | Low executing parallelism + low queueing | Graph, lack of ready remote work, or a long action is likely limiting |
-| Low executing parallelism + high queue duration/depth | Scheduler/worker capacity is likely limiting; the scheduler executing gauge corroborates activity but does not quantify slots |
+| Low executing parallelism + high queue duration | Scheduler/worker capacity is likely limiting; the scheduler executing gauge corroborates activity but does not quantify slots |
 | Long initial queue + fixed low concurrency plateau + later stepwise ramp | Capacity arrived late; slow autoscaling is plausible |
-| Scheduler `scaling_lag`: a p99 queue tail without backlog while the serving pool's ready replicas trailed its desired replicas | Capacity arrived late in that window; `scaleUp.phases` says whether nodes or image pulls are the delay |
+| Scheduler `scaling_lag`: a p99 tail above 60 s whose serving pool scaled up, was ready within 10 minutes, and was not `capacityLimited` | Healthy: capacity arrived late and caught up; `scaleUp.phases` says whether nodes or image pulls are the delay |
+| Scheduler `tail_latency` with `scaleUp.slow` | The scale-up took more than 10 minutes; fix the dominant phase |
+| Scheduler `congested` or `saturated` with `scaleUp`, as when a pool scales up from zero | Part of the wait was capacity arriving late; the verdict stands, and `scaleUp.phases` says which phase to fix |
+| Scheduler `tail_latency`, `congested`, or `saturated` with `capacityLimited` | The pool ran every slot at `maxReplicas`; more workers or a higher maximum is the remedy |
 | One worker handles most actions while several others handle only a small tail | Later worker participation supports the late-capacity hypothesis |
 
-The last two patterns do not prove autoscaler behavior. `list_worker_pools` is a
-live desired/available snapshot, and remote-action worker rows show participation
-only. `get_worker_scaling_timeline` is the preferred historical replica view when
-listed. Require its time-aligned desired/available/ready series, or an equivalent
+The long-initial-queue and single-worker patterns do not prove autoscaler
+behavior. `list_worker_pools` is a live desired/available snapshot, and
+remote-action worker rows show participation only. `get_worker_scaling_timeline`
+is the preferred historical replica view when listed. Require its time-aligned desired/available/ready series, or an equivalent
 controller scale-event timeline, to show capacity arriving after queue growth
 before stating that an autoscaler reacted slowly. If that history is unavailable,
 keep capacity arrival as a hypothesis and recommend instrumenting the scale
 decision, pod scheduling, image pull, and readiness timeline separately.
 
-When `get_scheduler_health` reports `scaling_lag`, `platformAssessments[].scaleUp.phases`
-already splits a scale-up into those parts, from the pool's own pod events. Fix the phase
-that dominates rather than the worker count:
+`list_worker_pools` also carries the autoscaler's live state: each KEDA-scaled pool's
+`scaledObject` conditions, the KEDA-owned HPA's `scalingActive`, and `unavailableSince`. A
+ScaledObject in `Fallback` for 10 minutes (`metricFailures` × 15 s, since KEDA counts one
+failure per HPA metric read and sets no `lastTransitionTime` on its own conditions), or
+`scalingActive` False on `FailedGetExternalMetric` or `FailedGetObjectMetric` for 10 minutes
+by `snapshotAt`, is a broken trigger: fix the trigger's metric query or its credentials, since
+the pool cannot scale until then. KEDA's `Ready` False alone, `FailedScheduling` while a node
+is added, and KEDA reconcile errors are transient, not autoscaler faults.
+
+Whenever `get_scheduler_health` returns `platformAssessments[].scaleUp`, whatever the
+verdict, its `phases` already split a scale-up into those parts, from the pool's own pod
+events. Fix the phase that dominates rather than the worker count; add workers or raise the
+maximum only for a `capacityLimited` pair or a backlog that outlasted the scale-up:
 
 | Dominant phase | What it means | Remedies |
 |----------------|---------------|----------|
-| Node wait (`nodeWaitMedianSeconds`) | New pods were unschedulable until the cluster autoscaler added a node | Keep warm node headroom on the worker node pool: low-priority placeholder pods that real workers preempt, or a node-pool minimum during working hours; a higher pool `minReplicas` holds warm workers at the cost of idle capacity |
+| Node wait (`nodeWaitMedianSeconds`) | New pods were unschedulable until the cluster autoscaler or Karpenter added a node | Keep warm node headroom on the worker node pool: low-priority placeholder pods that real workers preempt, or a node-pool minimum during working hours; a higher pool `minReplicas` holds warm workers at the cost of idle capacity |
 | Image pull (`imagePullMedianSeconds`, `slowestImage`) | Each new node pulled the runner image cold | Preload the image on worker nodes (a pre-pull DaemonSet, or the cloud's node-image or secondary-disk preload on GKE, EKS, or AKS), serve it from a registry close to the cluster with lazy or streamed pulls where supported, or slim the runner image |
 | Startup (`startupMedianSeconds` well above the pull) | Containers were slow to start after their images arrived | Inspect init containers and the worker's readiness with `list_buildbarn_events` and `get_buildbarn_pod_logs` |
 
@@ -367,7 +385,8 @@ When builds get slower and the cause is not cache-related or code-related:
    Use `list_buildbarn_events` for out-of-memory kills during the build window when listed.
    Records come back newest first with `hasMore` reporting whether older matches in the window
    were left out, so raise `limit` or narrow `timeRange` rather than concluding from a full page.
-4. **Scheduler**: `get_scheduler_health` → Queue depth growing? Specific platforms backed up?
+4. **Scheduler**: `get_scheduler_health` → Queue waits (p90, p99) longer for a specific
+   platform? Any pair with `backlogExcess`, or `stalled`?
 5. **Network**: `get_grpc_health` → Error rates or latencies elevated between components?
 6. **Configuration**: `get_buildbarn_config` → Has anything changed? Compare concurrency, storage
    sizes, and shard counts to what metrics suggest is needed.
@@ -378,10 +397,10 @@ When builds get slower and the cause is not cache-related or code-related:
 
 | Metric | Threshold | Action | Expected Impact |
 |--------|-----------|--------|-----------------|
-| Queue wait 90th percentile > 10 seconds | Sustained over 1 hour | Add workers for affected platform | Reduces queue wait proportional to workers added |
+| Scheduler `congested` or `saturated` (queue wait 90th percentile > 60 seconds, or a 10-minute backlog) | Outlasting the pool's scale-up, or `capacityLimited` | Add workers or raise `maxReplicas` for the affected platform | Reduces queue wait proportional to workers added |
 | Eviction age < 4 hours | Sustained trend | Increase disk and key-location map together, or add a storage shard | Reduces `CACHE_EVICTED` misses |
 | Measured CPU saturation plus action contention | Sustained during comparable builds; CPU seconds alone are insufficient | Validate worker concurrency and capacity | Can reduce execution time variance |
 | Worker memory > 80% | With out-of-memory kills | Increase worker memory limits | Eliminates out-of-memory action failures |
 | Storage Get 90th percentile > 100 milliseconds | Sustained | Increase key_location_map; check disk I/O | Reduces input fetch and cache lookup times |
 | Service mesh error rate > 1% | Any sustained period | Investigate specific error codes | Reduces action failures and retries |
-| Fleet utilization < 30% | Sustained over 7+ days | Reduce fleet size or improve autoscaler | Reduces infrastructure cost |
+| Fleet slot utilization (`activity.slotUtilization`) < 30% | Sustained over 7+ days | Reduce fleet size or improve autoscaler | Reduces infrastructure cost |
