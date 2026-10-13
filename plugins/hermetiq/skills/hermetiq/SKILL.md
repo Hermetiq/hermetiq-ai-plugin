@@ -788,16 +788,20 @@ For an opaque build ID, preserve the bounded flow:
 `get_invocation_insights`. Stop when those calls provide the duration/status and
 a supported recommendation.
 
-For the slowest builds in a window, follow the `find_slow_builds` prompt: page
-`list_builds` with `nextCursor` while `hasMore` is true and rank the fetched
-rows yourself, because they are ordered newest first. Rank only rows that report
-`durationSeconds` and whose `latestInvocation` has a terminal status. A build's
-`durationSeconds` runs from its first attempt's start to its last attempt's
-finish, so it includes any gap between retries; `latestInvocation.durationSeconds`
-is one attempt's runtime. Then explain the slowest build without asking first:
-run the known-invocation flow below on its `latestInvocation.invocationId`, and
-when `get_invocation_insights` returns `data.noInsightsReason`, report it and
-explain from `get_invocation` instead.
+For slow or regressed builds in a window, follow the `find_slow_builds` prompt:
+call `find_slow_invocations` once instead of paging and ranking builds yourself.
+The server compares every successful invocation in the window with the others
+that ran the same workload (same repository, command, target patterns, platform
+and remote-execution setting, whatever the branch). Call an invocation slow only
+when `data.slowInvocations` lists it, quoting its `durationSeconds`, its group's
+`medianSeconds` and its `timesMedian`; a long invocation that is not listed is
+normal for its workload, and a group needs at least 3 runs to be a baseline.
+Name a regression or improvement only from a group whose `medianShiftMeasured`
+is true, quoting both halves' run counts and medians and `medianChangePct`.
+Then explain the invocation with the highest `timesMedian` without asking first:
+run the known-invocation flow below on its `invocationId`, and when
+`get_invocation_insights` returns `data.noInsightsReason`, report it and explain
+from `get_invocation` instead.
 
 For a known invocation ID:
 
