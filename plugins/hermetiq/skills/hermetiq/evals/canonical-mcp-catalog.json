@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "07badf7ff57015f3170b326f04f391d78d9096bd-working-tree",
+  "sourceRevision": "ee1b79d4ce8331be80084af0d4548071e0b341da-working-tree",
   "server": "hermetiq-mcp-v2",
   "serverVersion": "0.19.0",
   "tools": [
@@ -15,6 +15,7 @@
     "find_actions",
     "find_cache_events",
     "find_remote_actions",
+    "find_slow_invocations",
     "get_action_execution",
     "get_build",
     "get_build_details",
