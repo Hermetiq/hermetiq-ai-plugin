@@ -11,10 +11,16 @@ Jsonnet/ConfigMap content before making config-specific recommendations.
 
 Use `analyze_buildbarn_storage` when it is registered (requires Kubernetes access) to
 **discover which config files the running Buildbarn workloads actually mount or read** and to
-flag secret-bearing keys. It does not validate storage geometry or configuration correctness —
-its own description says so, and it commonly returns `findings: []` for a perfectly ordinary
-deployment. Treat it as a file index, then read the files it names with
-`get_buildbarn_config(component=...)` and do the geometry yourself. By default it analyzes only
+flag secret-bearing keys. It also evaluates the storage StatefulSet's mounted configuration
+and returns block geometry in `data.geometry`. Check `data.geometry.status` and `reason`,
+then each store's status: only `computed` entries supply geometry to quote; `device_size_unknown`
+needs the raw device size, and `invalid` describes a layout bb-storage rejects. An overall
+`computed` status does not establish that every store was computed. Quote the returned
+`blockSizeBytes`, `usableCapacityBytes`, and `maximumBlobSizeBytes` with
+`data.geometry.sectorSizeAssumption` instead of recomputing them. Geometry does not otherwise
+validate configuration correctness, and empty `findings` does not establish healthy storage.
+Read the files it names with `get_buildbarn_config(component=...)` for the rest of the audit.
+By default it analyzes only
 mounted ConfigMaps: orphaned generations such as kustomize hash-suffixed copies are excluded
 unless you pass `includeUnmounted=true`, so read `data.scope`, `data.scopeReason`, and each
 entry's `mounted` field before calling anything the deployed configuration. Run discovery
@@ -149,8 +155,12 @@ without growing the map makes eviction worse, not better.**
   to start mutable stores otherwise.
 - `spareBlocks`: Buffer letting reads complete before block rotation. Typical: 3.
 
-**Maximum blob size** = `blocks bytes / total_blocks` (the block size). If actions produce
-larger outputs, uploads fail. Check the returned blob-size P99 against the block size.
+**Maximum blob size** is the returned `maximumBlobSizeBytes`, equal to `blockSizeBytes`
+for a computed store. Only when the tool cannot compute that store, derive block size as
+`floor(blocks bytes / sector size / total_blocks) * sector size` from the actual configuration
+and size evidence, stating the sector-size assumption. Usable capacity is that block size
+times the non-spare block count. If actions produce larger blobs, uploads fail; compare the
+ceiling with measured blob sizes and their coverage, since P99 alone does not prove all blobs fit.
 
 > **Geometry changes flush persistent stores.** Changing `spareBlocks`/`oldBlocks`/
 > `currentBlocks`/`newBlocks` or the blocks/device size changes the derived block size, and a
@@ -290,8 +300,10 @@ Diagnose capacity arrival from time-aligned evidence rather than from one peak.
 For a known invocation with remote execution enabled:
 
 1. Read a complete command line with `get_invocation(includeCommandLine=true)`
-   and extract the last effective numeric `--jobs` value. `--jobs` is a client
-   ceiling, not worker capacity.
+   and extract the last effective `--jobs` value. `--jobs` is a client
+   ceiling, not worker capacity; absent or `auto`, it is the client's CPU count,
+   which also caps remote actions. `get_invocation_insights` reports
+   `remote_jobs_capped` when the build ran at that ceiling.
 2. Call `get_project` and read `data.completedActionLogEnabled`. If it is false,
    remote-action details and parallelism are unavailable; skip the next two
    action-data steps and do not interpret missing rows as zero.
