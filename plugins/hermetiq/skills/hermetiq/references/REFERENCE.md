@@ -107,7 +107,9 @@ Key fields:
 - `digestHash` / `digestSize` — Content-addressed action identifier
 - `durationMicros` — Cache lookup latency
 - `CacheMissAnalysis.reason` — Why the lookup missed when `includeMissAnalysis=true`:
-  - `NEVER_CACHED` — No prior cache entry exists for this action
+  - `NEVER_CACHED` — No prior tracked hit for this action in the retained lookup window; an
+    expected cold start only when `summarize_cache_events` `data.workloadHistory.priorExposure`
+    is `CACHE_PRIOR_EXPOSURE_COLD`, otherwise unexplained without a baseline
   - `INPUT_CHANGED` — The action's input tree changed (most common)
   - `COMMAND_CHANGED` — The command line or flags changed
   - `ENV_CHANGED` — Environment variables affecting the action changed
@@ -229,7 +231,8 @@ Insight workflow:
    `get_build_parallelism`.
 5. For a remote-capacity claim, first confirm remote execution and
    `data.completedActionLogEnabled`. Compare only executing remote-action
-   concurrency with a complete last-wins numeric `--jobs`; the scheduler executing
+   concurrency with a complete last-wins numeric `--jobs`, or, when `--jobs` is
+   absent or `auto`, with the client's CPU count through `remote_jobs_capped`; the scheduler executing
    gauge, participating workers, worker slots, and replicas are different quantities.
    Treat a padded scheduler window as shared corroboration and require time-aligned
    desired/available/ready replica or scale-event history to prove autoscaler delay.
@@ -368,7 +371,11 @@ Response fields are under `data` and use proto-JSON camelCase:
   memory, GC, and Skymeld adoption.
 - `phaseTrends`, `bottleneckTrends`, `resourceTrends`, and `mnemonicTrends` — bounded
   low-cardinality profile rollups. Use mnemonic trends to identify action classes, not individual
-  targets.
+  targets. Each `phaseTrends` row's `meanSummedSeconds`, `p95SummedSeconds`, `maxSummedSeconds`
+  and `totalSummedSeconds` sum that phase's profile events across all of a build's concurrent
+  threads and actions, so a per-build figure can far exceed the build's wall time: report it as
+  accumulated work, never as a duration, latency, wait, or share of wall time. The remote
+  `*MicrosSum` summary fields are summed the same way.
 - `diagnostics` — precomputed MCP-friendly findings. Cite the diagnostic, then verify the
   recommendation against summary/trend metrics or a focused drill-down tool.
 - `usedRollups` — whether the server used scalable hourly rollups. Prefer rollups for broad
@@ -567,8 +574,11 @@ and one block is the **maximum storable blob**. The sector size is the host's
 `max(st_blksize, page size)` (4096 bytes in practice), and a file is rounded up to whole sectors.
 More than 100 total blocks is a startup failure. `analyze_buildbarn_storage` returns these values
 per store under `data.geometry.stores[]` (`blockSizeBytes`, `usableCapacityBytes`,
-`maximumBlobSizeBytes`, with `data.geometry.sectorSizeAssumption`); quote them rather than
-recomputing.
+`maximumBlobSizeBytes`, with `data.geometry.sectorSizeAssumption`). Check `data.geometry.status`
+and `reason` first: `unavailable` and `not_permitted` do not supply geometry. Even when it is
+`computed`, inspect each store's status and quote only computed entries rather than recomputing
+them. A `device_size_unknown` entry needs the actual raw device size before calculation; an
+`invalid` entry identifies a layout bb-storage rejects. Missing geometry is not zero capacity.
 
 **Key-location map configuration**:
 - `keyLocationMapMaximumGetAttempts`: 16 (recommended). Controls hash slot probes before
@@ -750,8 +760,9 @@ operator-supplied fact and label it as such.
 
 Concrete sizing values (disk sizes, key-location-map entries, block counts, shard counts,
 message limits, worker concurrency) drift per deployment and per release — do not quote
-remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (a file index and secret scan only,
-not geometry) without a store filter, followed by `get_buildbarn_config` (raw jsonnet). Both return only
+remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (configuration discovery,
+secret scanning, and computed block geometry where available) without a store filter, followed
+by `get_buildbarn_config` (raw jsonnet). Both return only
 ConfigMaps an installed Buildbarn workload mounts or reads unless you pass `includeUnmounted=true`;
 check `data.scope`, `data.scopeReason`, and each entry's `mounted` field. Take the CAS/AC/ISCC/FSAC
 mapping from `data.configurations[].stores` and the `data.configurations[].fields` behind it rather

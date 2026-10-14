@@ -41,5 +41,54 @@ class FinalPatternFailuresTest(unittest.TestCase):
         self.assertEqual(forbidden, [r"buildWallTimeMicros"])
 
 
+class BuildHistoryContractTest(unittest.TestCase):
+    current_response = (
+        "The response summarizes logical builds: totalBuildCount=10, successCount=5, "
+        "failureCount=2, interruptedCount=1, inProgressCount=1, unknownCount=1. "
+        "unknownCount counts finished builds without a recorded exit code. "
+        "The five outcome counters sum to totalBuildCount. "
+        "invocationCount is absent here; BuildSummary uses it for the invocations "
+        "within one build."
+    )
+
+    def setUp(self) -> None:
+        suite = RUNNER.load_json(RUNNER.DEFAULT_SUITE)
+        self.case = next(
+            case for case in suite["evals"]
+            if case["id"] == "build-history-response-contract"
+        )
+
+    def test_accepts_current_mcp_outcome_contract(self) -> None:
+        missing, forbidden = RUNNER.final_pattern_failures(
+            self.case, self.current_response
+        )
+
+        self.assertEqual(missing, [])
+        self.assertEqual(forbidden, [])
+
+    def test_rejects_obsolete_unknown_count_absence_claim(self) -> None:
+        for claim in (
+            "unknownCount is absent.",
+            "unknownCount is not returned.",
+            "The response does not include unknownCount.",
+        ):
+            with self.subTest(claim=claim):
+                _, forbidden = RUNNER.final_pattern_failures(
+                    self.case, self.current_response + " " + claim
+                )
+
+                self.assertTrue(forbidden)
+
+    def test_rejects_invocation_count_as_history_outcome_total(self) -> None:
+        missing, _ = RUNNER.final_pattern_failures(
+            self.case,
+            self.current_response.replace(
+                "sum to totalBuildCount", "sum to invocationCount"
+            ),
+        )
+
+        self.assertTrue(missing)
+
+
 if __name__ == "__main__":
     unittest.main()

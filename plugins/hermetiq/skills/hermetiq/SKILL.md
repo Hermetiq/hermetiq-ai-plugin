@@ -130,11 +130,17 @@ file the deployed configuration; `get_buildbarn_config` is scoped the same way
 and takes the same `includeUnmounted`. The `store` filter matches semantic
 configuration fields, not filenames, and `data.configurations[].stores` with
 `data.configurations[].fields` carries the content-derived CAS/AC/ISCC/FSAC
-mapping. Per its own tool description it does **not** validate storage geometry or
-configuration correctness, and `data.findings` is frequently empty — a
-`data.status` of `files_discovered` with `data.findings: []` means "these files
-exist", not "this storage is healthy". Never report empty findings as a clean
-audit. The separate `buildbarn://guides/storage-model` resource explains the
+mapping. It also evaluates the storage StatefulSet's mounted configuration and
+returns block geometry in `data.geometry`. Check its `status` and `reason`:
+`computed` means the configuration was evaluated; `unavailable` or `not_permitted`
+means geometry is unavailable. Even when the overall status is `computed`, check
+each `data.geometry.stores[]` entry's `status`: quote `blockSizeBytes`,
+`usableCapacityBytes`, and `maximumBlobSizeBytes` only for `computed` entries,
+with `data.geometry.sectorSizeAssumption`. A `device_size_unknown` entry needs the
+raw device size; an `invalid` entry describes a layout bb-storage rejects. This
+does not otherwise validate configuration correctness. Empty `data.findings`
+does not establish healthy storage or complete geometry coverage. The separate
+`buildbarn://guides/storage-model` resource explains the
 storage model when the client can retrieve MCP resources. If retrieval is unavailable,
 continue from schema/configuration evidence and disclose the missing reference.
 When schema tools are present, prefer `get_buildbarn_config_field` for a known
@@ -337,7 +343,7 @@ context and likewise are not tool calls.
 | Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop when those three calls answer the request |
 | Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` and `get_worker_scaling_timeline` when listed |
 | Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
-| Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")` — read `data.aggregations` and `supersededBySuccessfulAttempt` before any row, then `get_action_execution` only when the failure signatures are mixed |
+| Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")` — read `data.aggregations` and the rows' `supersededBySuccessfulAttempt` evidence first, then `get_action_execution` only when mixed signatures or missing details leave the cause unresolved |
 | Build failure output / "what did Bazel actually print?" | `get_build_logs` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
 | Failed or flaky tests | `get_test_results(includeLogs=true)`, then read `data.summary` (`failedCount`, `flakyCount`, `timeoutCount`, `passedCount`) | one call per verdict — `get_test_results(status="failed")`, `="flaky"`, `="timeout"` — then `get_test_trends`, `get_test_timing`, `get_failed_action_trends`, `get_flaky_action_trends` |
@@ -372,8 +378,9 @@ Work in this order unless the user's question is narrower:
    and use it as the index of candidate fixes.
 3. Cache effectiveness: misses re-run work and usually dominate avoidable time/cost.
 4. Remote capacity: when remote execution is enabled, correlate remote-action
-   queueing and execution parallelism with scheduler telemetry and a numeric
-   `--jobs` ceiling before assigning a graph or worker bottleneck.
+   queueing and execution parallelism with scheduler telemetry and the
+   `--jobs` ceiling before assigning a graph or worker bottleneck; an absent
+   `--jobs` is `auto`, the client's CPU count, which also caps remote actions.
 5. Critical path: long sequential chains limit speedup when ready work and
    scheduler capacity are not the constraint.
 6. Input fetch/output upload: large trees, large outputs, or storage contention.
@@ -525,7 +532,7 @@ Miss reason guidance:
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
 | `CACHE_EVICTED` | Storage too small or retention too short | Corroborate missing blobs and cache reuse intervals; insertion age alone cannot prove retention or eviction activity. Size disk and key-location map together only when capacity evidence supports it |
-| `NEVER_CACHED` | First observed action | Usually expected for new code or targets |
+| `NEVER_CACHED` | No prior tracked hit in the retained lookup window | For one invocation, read `summarize_cache_events` `data.workloadHistory`: `priorExposure` `CACHE_PRIOR_EXPOSURE_COLD` means nothing in the workload or its repository could have warmed the cache, so the misses are the expected cold start. Otherwise the cause stays unknown until a matched baseline or per-action diff explains it |
 | `INSUFFICIENT_TRACKED_HISTORY` | The tracked lookback did not reach far enough back to see a prior entry | Widen the comparison window before treating the miss as new work |
 | `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Not classifications: the miss was never classified, is still queued for enrichment, or enrichment gave up | Report the window as unclassified and assign no cause. None of these is accepted as a `reason` filter |
 
@@ -592,7 +599,12 @@ upper bound on concurrent actions, not fleet capacity. Read it from the complete
 command line using last-wins semantics. If it is absent, `auto`, non-numeric, or
 the command line is missing/truncated, do not invent a numeric cap. Compare that
 numeric ceiling only with `get_build_parallelism`'s executing remote-action
-concurrency. The scheduler `executing` gauge is an independently aggregated
+concurrency. `auto` still caps remote actions: it resolves to the client
+machine's CPU count, although remote actions use none of those CPUs. When
+`get_invocation_insights` reports `remote_jobs_capped`, the build ran at that
+client ceiling, with its action time spread across those slots above the
+critical path; raising `--jobs` is the change the evidence supports, and a flat
+parallelism series is its symptom, not a build-graph limit. The scheduler `executing` gauge is an independently aggregated
 scheduler metric, not a second concurrency count to compare with `--jobs`, and
 neither measurement is a count of worker slots or replicas. The series begins at
 the first remote action rather than at the invocation start, so the gap before
@@ -603,7 +615,8 @@ capacity or graph limit — do not run the matrix below on an empty series.
 
 | Observed evidence | Interpretation |
 |-------------------|----------------|
-| Low remote parallelism, low queue wait/depth | Build graph, lack of ready remote work, or one long action is the likely limit |
+| Low remote parallelism, low queue wait/depth, plateau below the client's CPU count | Build graph, lack of ready remote work, or one long action is the likely limit |
+| Remote parallelism flat at the client's CPU count with `--jobs` absent or `auto`, low queue wait, `remote_jobs_capped` reported | The client's `--jobs` is the limit; raise it for remote-execution builds and compare the next builds |
 | Low remote parallelism, high remote queue wait, and scheduler backlog | Scheduler or worker capacity is the likely limit, even when peak is far below `--jobs`; the scheduler executing gauge corroborates activity but is not a slot count |
 | Long initial queue, fixed low plateau, then stepwise concurrency and worker-participation growth | Capacity arrived late; slow autoscaling is a hypothesis |
 | Peak remains near a numeric `--jobs` cap while scheduler capacity is healthy | The client cap may bind; test a higher value rather than assuming |
@@ -762,7 +775,7 @@ remote-action concurrency and not a count of available worker slots or replicas.
 | gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes. Latency percentiles exclude the `buildbarn.remoteworker.OperationQueue` long poll, which an idle worker fleet holds open for minutes, unless `serviceFilter` names that service — `data.notes` states which applied |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence; `data.order` is `newest_first` and `data.hasMore` says whether older matches in the window were left out, so a full page is the newest slice and not the whole window. Records are projected onto diagnostic fields with the dropped names in `omittedFields` — pass `includeAllFields=true` for every ingested field | Raise `limit` or narrow `timeRange` before concluding; adjust limits or fix the failing component |
 | Remote actions fail for one toolchain only, with loader rather than compiler errors | `find_remote_actions`, `get_remote_action_command` | failed vs succeeded mnemonics, distinct `workerPod` values, requested `container-image` | Run the Remote Execution Environment Mismatch playbook |
-| Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, secret-bearing keys, and `data.findings` | Confirms what to read; geometry and sizing still need the file contents — run the Storage Configuration Audit playbook |
+| Storage config suspicion | `analyze_buildbarn_storage` | `data.configurationFiles`, `data.geometry`, secret-bearing keys, and `data.findings` | Read the discovered configuration and quote computed geometry per store; missing geometry needs configuration or device-size evidence — run the Storage Configuration Audit playbook |
 | Config suspicion | `get_buildbarn_config` plus proto-intel tools | storage, scheduler, worker fields | Validate Jsonnet/proto settings |
 
 ### Cost Optimization
@@ -791,13 +804,22 @@ a supported recommendation.
 For slow or regressed builds in a window, follow the `find_slow_builds` prompt:
 call `find_slow_invocations` once instead of paging and ranking builds yourself.
 The server compares every successful invocation in the window with the others
-that ran the same workload (same repository, command, target patterns, platform
-and remote-execution setting, whatever the branch). Call an invocation slow only
-when `data.slowInvocations` lists it, quoting its `durationSeconds`, its group's
+in its group: the same repository, command, target patterns, platform,
+remote-execution setting and `workloadOptions` (the `--config`, `--define`, test
+and build filter, `--compilation_mode` and `--platforms` values that tell CI
+lanes apart), and the same `executedActionsBand` (0, 1-9, 10-99, 100-999 or 1000+
+executed actions, those that were neither Bazel-internal nor cache hits),
+whatever the branch. A no-op run is never compared with a rebuild, so name each
+group you cite by its options and band. Call an invocation slow only when
+`data.slowInvocations` lists it, quoting its `durationSeconds`, its group's
 `medianSeconds` and its `timesMedian`; a long invocation that is not listed is
-normal for its workload, and a group needs at least 3 runs to be a baseline.
-Name a regression or improvement only from a group whose `medianShiftMeasured`
-is true, quoting both halves' run counts and medians and `medianChangePct`.
+normal for its group, and a group needs at least 3 runs to be a baseline. A run
+that executed far more actions than usual lands in a higher band rather than
+being called slow, so this tool does not find cache regressions; use
+`get_cache_trends` for those. Name a regression or improvement only from a group
+whose `medianShiftMeasured` is true, quoting both halves' run counts and medians
+and `medianChangePct`; never combine shifts across groups or read a change in
+how many runs fell in each band as a speed-up or slow-down.
 Then explain the invocation with the highest `timesMedian` without asking first:
 run the known-invocation flow below on its `invocationId`, and when
 `get_invocation_insights` returns `data.noInsightsReason`, report it and explain
@@ -910,8 +932,12 @@ For a known invocation ID:
 ### Failure or Test Failure
 
 1. Resolve the ID and get `get_invocation` or `get_build_details`.
-2. For build failures, call `find_actions(result="failed")`, then
-   `get_action_execution`.
+2. For build failures, call `find_actions(result="failed")`. Read
+   `data.aggregations` and the rows' `supersededBySuccessfulAttempt` evidence
+   before fetching details; a retried action is not proof of a failed build.
+   Call `get_action_execution` for returned action IDs only when mixed signatures
+   or missing details leave the cause unresolved. Do not fetch every row when the
+   aggregate and returned evidence already answer the question.
 3. Call `get_build_logs` for the invocation's redacted stdout/stderr. Each stream
    is capped at 4096 bytes; when it is longer the head **and** the tail are both
    kept around a marked omission and the path is listed in `truncatedFields`. Read
@@ -936,8 +962,9 @@ For a known invocation ID:
    the absent aggregate and use paged rows): it describes the whole filtered
    set rather than the page. Rows with empty stderr whose `byStatusCode` is a single
    gRPC `4` (`DEADLINE_EXCEEDED`) and whose `durationStats` min and max agree to the
-   second were killed by a configured timeout, not by the code — Buildbarn probes an
-   action on the smallest size class and retries it larger. Any row reporting
+   second are consistent with a configured timeout; confirm the recorded timeout
+   and retry evidence before assigning the cause. Buildbarn can probe an action on
+   the smallest size class and retry it larger. Any row reporting
    `supersededBySuccessfulAttempt: true` already succeeded at the same digest and is
    not a failure at all, so an invocation full of them can still have succeeded.
    Check `get_invocation` `data.invocation.status` before reporting a failure.
@@ -1040,11 +1067,13 @@ uniform duration clamp means a timeout, and you should stop here.
 
 1. Call `analyze_buildbarn_storage` without `store` to establish which storage
    configuration files `data.configurationFiles` names, plus any secret-bearing
-   keys and `data.findings` it reports. Treat this as scoping, not as the audit: it does
-   not return geometry, key-location-map sizing, shard topology, or
-   schema-validation errors, and `findings` is often empty. To audit anything you
-   still need the file contents — go on to `get_buildbarn_config` for each file it
-   named. Take the CAS/AC/ISCC/FSAC mapping from `data.configurations[].stores`,
+   keys and `data.findings` it reports. Read `data.geometry.status`, its reason,
+   and each store's status before using computed block geometry; an overall
+   `computed` status does not mean every store was computed. Geometry is not a
+   complete configuration audit, and empty findings do not establish correctness.
+   Read `get_buildbarn_config` for the discovered files to assess the remaining
+   configuration, including key-location-map sizing. Take the CAS/AC/ISCC/FSAC
+   mapping from `data.configurations[].stores`,
    with the `data.configurations[].fields` that established it, rather than from a
    filename substring or the user's requested store label; the `store` argument
    itself now matches those semantic configuration fields rather than filenames.
@@ -1076,9 +1105,16 @@ uniform duration clamp means a timeout, and you should stop here.
    rather than `eviction_age`, and treat a tens-of-megabytes blob-size p50 as a histogram
    bucket artifact rather than a real median. `references/infrastructure-tuning.md` has the
    full metric table and both caveats.
-3. For stores on raw block devices the config cannot reveal the device size — ask
-   the operator for the device or PVC size, then finish the arithmetic
-   (block size = device bytes / total blocks; one block is the largest storable blob).
+3. For each store whose geometry status is `computed`, quote the returned
+   `blockSizeBytes`, `usableCapacityBytes`, and `maximumBlobSizeBytes` with
+   `data.geometry.sectorSizeAssumption` instead of recomputing them. For
+   `device_size_unknown`, obtain the actual raw device size from the operator.
+   If geometry is unavailable, state the reason and calculate only when the
+   configuration and size evidence are sufficient: block size is
+   `floor(blocks bytes / sector size / total blocks) * sector size`; usable
+   capacity is that block size times the non-spare block count. State the
+   sector-size assumption. One block is the largest storable blob. Report an
+   `invalid` layout and its reason rather than treating missing values as zero.
 4. Map each issue to a remediation with two standing cautions: geometry changes
    (block counts or blocks/device size) flush a persistent store on next start, and
    the key-location map must grow together with the blocks (plus the memory request
