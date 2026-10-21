@@ -38,7 +38,7 @@ Read these only when the user needs the deeper detail:
 
 ## Use the Server Prompts
 
-The server defines 19 workflow prompts, gated by deployment capabilities. Use a matching
+The server defines 18 workflow prompts, gated by deployment capabilities. Use a matching
 prompt when the client exposes MCP prompt retrieval. `prompts/get` renders instructions; it
 does not execute the investigation. Clients without a prompt bridge can follow the workflows
 in this skill directly. Do not claim that prompt retrieval or execution is universally impossible,
@@ -154,7 +154,7 @@ the type string is not itself a valid `fqn` — resolve one from
 `describe_buildbarn_config_type` on it.
 
 Available prompts include `debug_cache_misses`, `analyze_invocation`,
-`invocation_insights`, `investigate_failure`, `diagnose_exec_environment`,
+`investigate_failure`, `diagnose_exec_environment`,
 `test_failures`, `project_health`,
 `cost_analysis`, `find_slow_builds`, `weekly_trends_report`, `cache_trends`,
 `profile_trends`, `rbe_trends`, `rbe_optimization`, `compare_periods`,
@@ -162,7 +162,7 @@ Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `setup_hermetiq_bazel`. Use a prompt when it matches the user's intent; otherwise
 call the tools directly. Their arguments are: `invocation_id` for
 `analyze_invocation`, `debug_cache_misses`, `diagnose_exec_environment`,
-`infra_health`, `investigate_failure`, `invocation_insights`, and
+`infra_health`, `investigate_failure`, and
 `test_failures`; `lookback` plus `repository`, `command`, `pattern`, `branch`,
 and `user` for `cache_trends`, `compare_periods`, `find_slow_builds`,
 `project_health`, `rbe_optimization`, `rbe_trends`, and `weekly_trends_report`
@@ -848,7 +848,15 @@ For a known invocation ID:
    listed, say that cache-event metrics are unavailable.
 4. When remote execution is false, skip `analyze_remote_execution`,
    `get_build_parallelism`, and scheduler tools. Diagnose cache, profile, local
-   resource, critical-path, or analysis evidence instead.
+   resource, critical-path, or analysis evidence instead. Check
+   `data.profile.phases` and `data.profile.hotspots` (such as `repo_fetch`,
+   `starlark`, and `package_creation`) when `analysisSeconds` is a large share of
+   wall time, and compare `data.profile.resources.maxLoadAverage` against local
+   concurrency (`--jobs`, `--local_test_jobs`, and multi-worker test env vars)
+   when local test shards run concurrently. When `get_build_details` shows
+   multiple `bazel test //...` invocations sharing one `buildId` with distinct
+   `--test_tag_filters`, check whether `--build_tests_only` is missing (causing
+   filtered test lanes to compile and link non-matching targets redundantly).
 5. When remote execution is true, call `get_project` and read
    `data.completedActionLogEnabled`. If it is false, report remote-action detail
    and parallelism as unavailable rather than zero and skip

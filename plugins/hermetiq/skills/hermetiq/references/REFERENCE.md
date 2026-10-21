@@ -193,14 +193,19 @@ Exact fields:
   that actually extended the build; `remoteQueueSeconds` is far larger and mostly ran in parallel.
 - `analysisSeconds` comes from Bazel's own timing metrics where the build reported them.
 - `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
+- `phases` (`phase`, `durationSeconds`, `shareOfPhaseTotalPct`), `hotspots` (`category`,
+  `name`, `durationSeconds`, `count`), and `mnemonics` (`mnemonic`, `count`, `totalSeconds`,
+  `meanSeconds`, `maxSeconds`, `shareOfActionTimePct`) when present on the profile, bounded to
+  the top entries so `repo_fetch`, `starlark`, `package_creation`, and dominant mnemonics are
+  immediately visible
 - `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
   `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
   `caveats`
 
-Raw microsecond phase fields, fetch/upload/output-download subphases, GC counts, resource
-arrays, timeline segments, and hotspot arrays are not exposed in this payload. Use the trend or
-dedicated drill-down tools when those surfaces are needed. Prefer `get_invocation_insights` for
-the current typed insight schema when only the action plan is needed.
+Raw microsecond phase fields, fetch/upload/output-download subphases, GC counts, and timeline
+segments are not exposed in this payload. Use the trend or dedicated drill-down tools when
+those surfaces are needed. Prefer `get_invocation_insights` for the current typed insight
+schema when only the action plan is needed.
 
 `get_invocation_insights` returns typed records under `data.insights`:
 - `insightId` — stable key for dedupe and per-rule links.
