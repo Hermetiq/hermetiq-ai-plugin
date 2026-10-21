@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "6233ae9f8dae6beb203d67163adbffdee3e3a6a2-working-tree",
+  "sourceRevision": "8c63e47fc1bfe971f8974932e4810ee301b08b75",
   "server": "hermetiq-mcp-v2",
   "serverVersion": "0.19.0",
   "tools": [
@@ -9,6 +9,7 @@
     "analyze_buildbarn_storage",
     "analyze_config_map_yaml",
     "analyze_remote_execution",
+    "compare_build_configurations",
     "describe_buildbarn_config_type",
     "diff_config_set_commits",
     "export_config_map_yaml",
@@ -95,7 +96,6 @@
       "find_slow_builds",
       "infra_health",
       "investigate_failure",
-      "invocation_insights",
       "profile_trends",
       "project_health",
       "rbe_optimization",
