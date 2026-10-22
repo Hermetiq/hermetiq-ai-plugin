@@ -182,22 +182,25 @@ events.
 
 Exact fields:
 - `bazelVersion`
-- Wall-clock, bounded by the build's own duration: `wallTimeSeconds`, `analysisSeconds`,
-  `executionSeconds`, `criticalPathSeconds`
-- Sums over concurrent action spans, which routinely exceed the build and are **never** a share
-  of wall time: `actionTimeSeconds`, `remoteExecutionSeconds`, `remoteQueueSeconds`,
-  `criticalPathQueueSeconds`, `gcSeconds`. Weigh these against `actionTimeSeconds`, never
-  against `wallTimeSeconds` — dividing one by the other is what once had an insight reporting
-  two thirds of a build's wall time as recoverable from a single flag.
-- `criticalPathQueueSeconds` is queue wait on critical-path actions only, and is the queue time
-  that actually extended the build; `remoteQueueSeconds` is far larger and mostly ran in parallel.
-- `analysisSeconds` comes from Bazel's own timing metrics where the build reported them.
+- Wall-clock measurements: `wallTimeSeconds`, `analysisSeconds`, and `executionSeconds`.
+  `analysisSeconds` comes from Bazel's own timing metrics where reported. Analysis can overlap
+  execution under Skymeld, so the two phase spans are not necessarily additive.
+- `criticalPathSeconds` is the observed action-duration critical-path span, including waiting
+  and retries, not an irreducible execution floor. `criticalPathQueueSeconds` sums reported
+  pre-success queue spans on that path. Those intervals can include earlier attempts'
+  execution and are not guaranteed idle waiting or recoverable build time.
+- Sums over concurrent action spans: `actionTimeSeconds`, `remoteExecutionSeconds`, and
+  `remoteQueueSeconds`. These routinely exceed wall time. Compare their cumulative work with
+  `actionTimeSeconds`, not with `wallTimeSeconds`, and do not turn a ratio into a savings claim.
+- `gcSeconds` is summed JVM garbage-collection pause time, separate from action-span totals.
 - `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
-- `phases` (`phase`, `durationSeconds`, `shareOfPhaseTotalPct`), `hotspots` (`category`,
-  `name`, `durationSeconds`, `count`), and `mnemonics` (`mnemonic`, `count`, `totalSeconds`,
-  `meanSeconds`, `maxSeconds`, `shareOfActionTimePct`) when present on the profile, bounded to
-  the top entries so `repo_fetch`, `starlark`, `package_creation`, and dominant mnemonics are
-  immediately visible
+- `phases` (`phase`, `totalSeconds`), cumulative across threads; `hotspots` (`kind`, `name`,
+  `totalSeconds`, `maxSeconds`, `count`); and `mnemonics` (`mnemonic`, `count`, `totalSeconds`,
+  `maxSeconds`, `shareOfActionTime`) when present, bounded to the top entries.
+  `shareOfActionTime` is a fraction of `actionTimeSeconds`, not a percentage of wall time.
+  Hotspot `maxSeconds` is the longest single occurrence; `totalSeconds` sums all occurrences,
+  which may overlap. Nested repository and Starlark hotspots can describe the same work;
+  do not add them together.
 - `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
   `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
   `caveats`
