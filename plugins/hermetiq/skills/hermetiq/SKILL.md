@@ -241,6 +241,11 @@ context and likewise are not tool calls.
   `exitCode` is absent, not 0, whenever the backend recorded none. No `status`
   filter can select `unknown`, so a filtered count can add up to less than the
   unfiltered total — say so rather than calling it a discrepancy.
+- When `telemetryIncomplete=true`, final build events did not arrive. Omitted execution
+  and cache counters are unknown, and the end time/duration may be inferred.
+  Independently recorded remote actions or test results can extend beyond that
+  inferred end; preserve their timestamps instead of discarding them or treating
+  the inferred duration as an exact performance baseline.
 - Per-build `BuildSummary` objects returned by `list_builds`, `get_build`, and
   `get_build_details` carry five counts that together account for
   `invocationCount`: `successCount`, `failureCount`, `interruptedCount`,
@@ -399,7 +404,10 @@ mnemonics, phases, or flags.
 - An empty `data.insights` is not a clean build. Read `data.noInsightsReason`: when it is set,
   the list is empty because no profile was measured — a build still running, or one that never
   captured one — and reporting the build as clean is wrong. Empty with no reason does mean the
-  profile was analyzed and nothing was flagged.
+  profile was analyzed and no current rule flagged it, not that no optimization is possible.
+  If final events were lost, check the effective command line before suggesting profiling
+  flags: an invocation can already have both profiling flags enabled and still lose the
+  uploaded profile. Recommend investigating event/profile delivery, not adding the same flags.
 - Rank by kind before magnitude. A correctness insight such as `disk_cache_with_remote_execution`
   describes a build that can fail later and leads regardless of duration; performance insights
   follow. `estimatedSavings` is now absent from almost every insight, so ordering by the
@@ -504,6 +512,20 @@ or Bazel's local disk-cache counters. A zero-hit result explains why remote work
 had to execute, but a like-for-like cold-build comparison is still required to
 decide whether cache misses explain an unusual regression.
 
+When the observed lookup denominator is zero, the hit rate is undefined even if
+the response encodes `hitRate=0`; say no remote cache lookups were observed. A
+warm local no-op can have local action-cache hits and no remote lookups or remote
+executions while remote execution is enabled. Do not diagnose cache failure or
+worker underutilization from that absence. Treat rates from only one or two
+lookups as small samples rather than fleet-wide cache health.
+
+A cached passing test is a reused result for its declared action inputs. State
+that the test did not re-execute, but do not call current-code verification
+invalid without evidence of undeclared inputs or another hermeticity defect.
+Keep test-result caching enabled for performance. A forced fresh run such as
+`--cache_test_results=no` is an optional verification experiment when the user
+needs re-execution, not a required repair merely because the cache worked.
+
 Every `hitRate` and `byteHitRate` in `get_cache_trends` — `summary`, `buckets`,
 `byMnemonic`, `topMissTargets`, and the heatmap — is a fraction from 0 to 1,
 matching the identically named fields in `summarize_cache_events` and
@@ -540,6 +562,10 @@ If `INPUT_CHANGED` dominates for one mnemonic or target, call
 `find_cache_events(includeMissAnalysis=true)` and inspect the input, command,
 environment, platform, and output-path diffs. Use `get_remote_action_command` with an
 action digest when command arguments or environment need confirmation.
+One target/mnemonic can cover multiple action roles, such as a long test run
+and later test-XML generation. Match the miss's digest, command and output role
+to the expensive action before saying it caused that action to rerun; a changed
+input on the XML action alone does not explain the test execution miss.
 
 ### Remote Execution Efficiency
 
@@ -574,8 +600,13 @@ Read response fields under `data` by their proto-JSON (camelCase) names, which
 is what the server emits: `stats`, `slowestActions`, `expensiveTargets`, `queueWaitStats`,
 `ioHotspots`, `workers`, `cpuEfficiencyStats`, `cacheMissCandidates`, and
 `cacheSummary`. The snake_case proto field names do not appear in tool output.
-Note `workerInfo` is returned empty alongside a populated `workers` — use
-`workers`.
+Use `workers` for per-node action participation. `workerInfo` is separate host
+metadata and may be empty or enriched; do not assume the arrays align by index.
+A worker pod can execute several actions concurrently. One participating pod
+does not prove serialization; compare returned execution intervals for overlap.
+Test-result `attempt` counts are not remote scheduler attempt history.
+`cacheSummary.repeatedActions=0` means no successful uncached repeat attempts;
+it does not establish that no earlier failed remote attempt occurred.
 
 `expensiveTargets` ranks on accumulated action cost. When a deployment has no
 cost enrichment every row ties at zero, so treat a zero-cost `expensiveTargets`
@@ -612,6 +643,14 @@ the first bucket is analysis and local work, not idle capacity. An invocation
 with no remote actions returns an **empty** series: that means no remote
 execution was observed, not zero concurrency, and it is never evidence of a
 capacity or graph limit — do not run the matrix below on an empty series.
+
+A single long action is an optimization candidate, not an irreducible floor.
+Unknown or unsupported test sharding does not rule out improving its algorithm,
+setup, runner, or dependencies. Verify existing shards, runner support and
+parallel critical-path headroom before projecting wall-time savings. Cached
+test-result durations can describe prior executions; do not mix them with fresh
+executions to declare the current run an outlier or normal without matching the
+measurement population and workload.
 
 | Observed evidence | Interpretation |
 |-------------------|----------------|
@@ -851,7 +890,10 @@ For a known invocation ID:
    resource, critical-path, or analysis evidence instead. Check
    `data.profile.phases` and `data.profile.hotspots` (such as `repo_fetch`,
    `starlark`, and `package_creation`) when `analysisSeconds` is a large share of
-   wall time, and compare `data.profile.resources.maxLoadAverage` against local
+   wall time. Prefer the named hotspot over generic macro advice: a repository
+   implementation can be nested in Starlark work, so inspect its longest
+   occurrence and compare equivalent warm/cold runs before proposing rule edits.
+   Compare `data.profile.resources.maxLoadAverage` against local
    concurrency (`--jobs`, `--local_test_jobs`, and multi-worker test env vars)
    when local test shards run concurrently. When `get_build_details` shows
    multiple `bazel test //...` invocations sharing one `buildId` with distinct
@@ -904,6 +946,10 @@ For a known invocation ID:
 10. Rank findings by observed wall-time impact. Keep Action Cache misses,
    scheduler queueing, and slow individual actions separate rather than making
    one explain the entire duration.
+   Account for unassigned elapsed time explicitly: a 6s analysis span in a 13s
+   invocation is not its only remaining cost. Report measured phase spans and
+   their possible overlap; leave startup, setup, or other gaps unresolved when
+   the returned evidence does not attribute them.
 
 ### Cache Hit Rate Improvement
 
