@@ -73,19 +73,32 @@ sign-in prompts.
 
 ### Self-hosted / on-prem
 
-The plugin defaults to Hermetiq Cloud (`https://mcp.cloud-usc1.hermetiq.io`). For a
-self-hosted deployment, set `HERMETIQ_MCP_URL` in the environment that launches
-Claude Code:
+The `hermetiq` plugin connects to Hermetiq Cloud (`https://mcp.cloud-usc1.hermetiq.io`).
+For a self-hosted deployment, install `hermetiq-self-hosted` instead. It ships the
+same skills without the Cloud MCP server:
+
+```text
+/plugin marketplace add Hermetiq/hermetiq-ai-plugin
+/plugin install hermetiq-self-hosted@hermetiq
+/reload-plugins
+```
+
+Then add your deployment's MCP server in your terminal:
 
 ```bash
-export HERMETIQ_MCP_URL=https://mcp.hermetiq.your-domain.example/
+claude mcp add --transport http --scope user hermetiq https://mcp.hermetiq.your-domain.example/
 ```
 
 Copy your deployment's **exact** MCP resource URL, including its path and any
 trailing slash. In the Auth0 setup covered by the installation skill, it must
 match the API identifier/audience, `api.mcpResourceUrl`, and protected-resource
 metadata byte for byte. See the [on-prem authentication guidance](plugins/hermetiq/skills/on-prem-gke-install/SKILL.md#5-auth0--oidc-setup).
-The plugin reads the environment variable automatically; no manifest edit is needed.
+Sign in through `/mcp`. See [Claude Code's MCP setup documentation](https://code.claude.com/docs/en/mcp)
+for other configuration scopes.
+
+Skill commands for this plugin use the `/hermetiq-self-hosted:` prefix, such as
+`/hermetiq-self-hosted:hermetiq`. To update it, substitute
+`hermetiq-self-hosted@hermetiq` in the [upgrade commands](#upgrade-to-the-latest-version).
 
 ### MCP-only setup
 
@@ -96,8 +109,7 @@ claude mcp add --transport http --scope user hermetiq https://mcp.cloud-usc1.her
 ```
 
 For self-hosted deployments, substitute the exact URL described above. Authenticate
-through `/mcp` in Claude Code. See [Claude Code's MCP setup documentation](https://code.claude.com/docs/en/mcp)
-for other configuration scopes.
+through `/mcp` in Claude Code.
 
 ## Install in Claude Desktop chat
 
@@ -221,6 +233,10 @@ shown by `claude plugin list`.
 
 Restart Claude Code, or run `/reload-plugins` inside your open session, to load
 the update. Check the installed version with `claude plugin list`.
+
+Self-hosted users upgrading from 1.3.x: the `hermetiq` plugin no longer reads
+`HERMETIQ_MCP_URL` and always connects to Hermetiq Cloud. Uninstall it, then follow
+[Self-hosted / on-prem](#self-hosted--on-prem).
 
 Third-party marketplaces have automatic updates off by default. To enable them,
 open `/plugin` → **Marketplaces** → **hermetiq** → **Enable auto-update**.

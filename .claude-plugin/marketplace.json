@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Hermetiq plugins for Bazel build optimization and analytics",
-    "version": "1.3.10",
+    "version": "1.4.0",
     "pluginRoot": "./plugins"
   },
   "plugins": [
@@ -14,9 +14,21 @@
       "name": "hermetiq",
       "source": "./plugins/hermetiq",
       "description": "Bazel build optimization skill with deep Buildbarn and remote execution expertise. Interprets Hermetiq MCP tool results with domain knowledge.",
-      "version": "1.3.10",
+      "version": "1.4.0",
       "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
       "license": "Apache-2.0"
+    },
+    {
+      "name": "hermetiq-self-hosted",
+      "source": "./plugins/hermetiq/skills",
+      "description": "Hermetiq skills without the bundled Hermetiq Cloud MCP server, for self-hosted deployments. Connect your deployment's MCP server with claude mcp add.",
+      "version": "1.4.0",
+      "author": { "name": "Hermetiq", "url": "https://hermetiq.com" },
+      "homepage": "https://hermetiq.com/docs",
+      "repository": "https://github.com/Hermetiq/hermetiq-ai-plugin",
+      "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
+      "license": "Apache-2.0",
+      "skills": "./"
     }
   ]
 }
