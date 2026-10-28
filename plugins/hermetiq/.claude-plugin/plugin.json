@@ -1,6 +1,6 @@
 {
   "name": "hermetiq",
-  "version": "1.3.11",
+  "version": "1.4.1",
   "description": "Bazel build optimization skill powered by Hermetiq analytics",
   "author": {
     "name": "Hermetiq",
@@ -14,7 +14,7 @@
   "mcpServers": {
     "hermetiq": {
       "type": "http",
-      "url": "${HERMETIQ_MCP_URL:-https://mcp.cloud-usc1.hermetiq.io}"
+      "url": "https://mcp.cloud-usc1.hermetiq.io"
     }
   }
 }

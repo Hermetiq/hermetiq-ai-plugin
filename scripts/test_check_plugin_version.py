@@ -141,6 +141,28 @@ class PluginVersionCheckTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("must match", completed.stderr)
 
+    def test_rejects_stale_version_on_another_marketplace_entry(self) -> None:
+        base = self.git("rev-parse", "HEAD").stdout.strip()
+        self.skill.write_text("new guidance\n", encoding="utf-8")
+        self.write_versions("1.3.0")
+        marketplace = json.loads(self.marketplace_manifest.read_text(encoding="utf-8"))
+        marketplace["plugins"].append(
+            {
+                "name": "hermetiq-self-hosted",
+                "source": "./plugins/hermetiq/skills",
+                "version": "1.2.0",
+            }
+        )
+        self.marketplace_manifest.write_text(
+            json.dumps(marketplace) + "\n", encoding="utf-8"
+        )
+        self.commit("bump only the main entry")
+
+        completed = self.check(base)
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("must match", completed.stderr)
+
     def test_rejects_non_increasing_version(self) -> None:
         base = self.git("rev-parse", "HEAD").stdout.strip()
         self.skill.write_text("new guidance\n", encoding="utf-8")

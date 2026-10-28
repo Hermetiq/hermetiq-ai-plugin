@@ -75,26 +75,24 @@ def load_json(path: Path) -> Any:
         raise CheckError(f"cannot read {path}: {error}") from error
 
 
-def manifest_versions(root: Path) -> tuple[str, str, str]:
+def manifest_versions(root: Path) -> tuple[str, ...]:
     plugin = load_json(root / PLUGIN_MANIFEST)
     marketplace = load_json(root / MARKETPLACE_MANIFEST)
     try:
         plugin_version = plugin["version"]
         metadata_version = marketplace["metadata"]["version"]
-        marketplace_version = next(
-            entry["version"]
-            for entry in marketplace["plugins"]
-            if entry["name"] == "hermetiq"
-        )
+        entries = marketplace["plugins"]
+        next(entry for entry in entries if entry["name"] == "hermetiq")
+        entry_versions = tuple(entry["version"] for entry in entries)
     except (KeyError, StopIteration, TypeError) as error:
         raise CheckError(f"missing Hermetiq version field: {error}") from error
-    versions = (plugin_version, metadata_version, marketplace_version)
+    versions = (plugin_version, metadata_version, *entry_versions)
     if not all(isinstance(version, str) for version in versions):
         raise CheckError("all Hermetiq version fields must be strings")
     if len(set(versions)) != 1:
         raise CheckError(
-            "plugin.json version, marketplace metadata.version, and marketplace "
-            f"plugin version must match (found {versions})"
+            "plugin.json version, marketplace metadata.version, and every "
+            f"marketplace plugin version must match (found {versions})"
         )
     SemVer.parse(plugin_version)
     return versions
@@ -143,7 +141,7 @@ def main() -> int:
     arguments = parser.parse_args()
 
     try:
-        plugin_version, _, _ = manifest_versions(REPO_ROOT)
+        plugin_version, *_ = manifest_versions(REPO_ROOT)
         if not arguments.base_ref:
             print(f"plugin versions are synchronized at {plugin_version}")
             return 0
