@@ -17,6 +17,18 @@
       "version": "1.4.0",
       "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
       "license": "Apache-2.0"
+    },
+    {
+      "name": "hermetiq-self-hosted",
+      "source": "./plugins/hermetiq/skills",
+      "description": "Hermetiq skills without the bundled Hermetiq Cloud MCP server, for self-hosted deployments. Connect your deployment's MCP server with claude mcp add.",
+      "version": "1.4.0",
+      "author": { "name": "Hermetiq", "url": "https://hermetiq.com" },
+      "homepage": "https://hermetiq.com/docs",
+      "repository": "https://github.com/Hermetiq/hermetiq-ai-plugin",
+      "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
+      "license": "Apache-2.0",
+      "skills": "./"
     }
   ]
 }
