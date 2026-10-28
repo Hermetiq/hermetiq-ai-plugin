@@ -1145,6 +1145,25 @@ uniform duration clamp means a timeout, and you should stop here.
 - If a capability is absent from `tools/list`, state that it is unavailable in
   this deployment. Do not call it and do not imply that a metrics tool can
   replace a configuration, log, Kubernetes, or cost capability.
+- Live infrastructure tools (scheduler, worker, storage, gRPC, Kubernetes,
+  RbeWorker and scaling-timeline tools, and Barn Owl checks) share one
+  per-project RBE access policy. An error starting `live_evidence_denied:` applies
+  to every live tool for that project, not just the one called. Relay the remedy
+  it names (an administrator enabling the project, or the minimum role), make no
+  further live calls in that session, and continue with build analytics tools. On
+  `live_evidence_unavailable:` the policy could not be checked; retry once later
+  rather than in a loop.
+- A live tool can also fail in the client before any `data` arrives, for example
+  `missing required resultType` from a client that negotiated MCP protocol
+  2026-07-28. When non-live tools succeed in the same session, treat that error
+  like a denial: the server's refusal did not reach you. Do not try the remaining
+  live tools one by one. Report live infrastructure evidence as unavailable,
+  quote the client error, and fall back to build analytics.
+- Barn Owl checks (`check_rbe_health`, `explain_rbe_pool_config`,
+  `diagnose_rbe_idle_workers`, `recommend_rbe_optimizations`) are listed only
+  where the deployment runs Barn Owl's investigation runner. When they are
+  absent, say Barn Owl checks are unavailable in this deployment and use the
+  underlying live tools; never invent an investigation ID or verdict.
 - `import_config_map_yaml` and `save_config_set` are mutations. Review the
   server-authorized project, exact ConfigSet/files/version and side effects.
   Proceed only within the user's explicit authorization for that concrete change;
