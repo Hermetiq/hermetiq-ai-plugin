@@ -114,7 +114,8 @@ Key fields:
   - `COMMAND_CHANGED` — The command line or flags changed
   - `ENV_CHANGED` — Environment variables affecting the action changed
   - `PLATFORM_CHANGED` — Platform requirements changed
-  - `CACHE_EVICTED` — Entry existed but was evicted from storage
+  - `CACHE_EVICTED` — A previously tracked entry was unavailable; storage size or short
+    retention are hypotheses to corroborate, not established causes
   - `PLATFORM_SUFFIX_CHANGED` — Platform configuration drift
   - `INSTANCE_MISMATCH` — Different remote cache instance
   - `INSUFFICIENT_TRACKED_HISTORY` — The tracked lookback did not reach far enough back to
@@ -182,22 +183,25 @@ events.
 
 Exact fields:
 - `bazelVersion`
-- Wall-clock, bounded by the build's own duration: `wallTimeSeconds`, `analysisSeconds`,
-  `executionSeconds`, `criticalPathSeconds`
-- Sums over concurrent action spans, which routinely exceed the build and are **never** a share
-  of wall time: `actionTimeSeconds`, `remoteExecutionSeconds`, `remoteQueueSeconds`,
-  `criticalPathQueueSeconds`, `gcSeconds`. Weigh these against `actionTimeSeconds`, never
-  against `wallTimeSeconds` — dividing one by the other is what once had an insight reporting
-  two thirds of a build's wall time as recoverable from a single flag.
-- `criticalPathQueueSeconds` is queue wait on critical-path actions only, and is the queue time
-  that actually extended the build; `remoteQueueSeconds` is far larger and mostly ran in parallel.
-- `analysisSeconds` comes from Bazel's own timing metrics where the build reported them.
+- Wall-clock measurements: `wallTimeSeconds`, `analysisSeconds`, and `executionSeconds`.
+  `analysisSeconds` comes from Bazel's own timing metrics where reported. Analysis can overlap
+  execution under Skymeld, so the two phase spans are not necessarily additive.
+- `criticalPathSeconds` is the observed action-duration critical-path span, including waiting
+  and retries, not an irreducible execution floor. `criticalPathQueueSeconds` sums reported
+  pre-success queue spans on that path. Those intervals can include earlier attempts'
+  execution and are not guaranteed idle waiting or recoverable build time.
+- Sums over concurrent action spans: `actionTimeSeconds`, `remoteExecutionSeconds`, and
+  `remoteQueueSeconds`. These routinely exceed wall time. Compare their cumulative work with
+  `actionTimeSeconds`, not with `wallTimeSeconds`, and do not turn a ratio into a savings claim.
+- `gcSeconds` is summed JVM garbage-collection pause time, separate from action-span totals.
 - `bottleneckKind`, `bottleneckRatio`, and `effectiveParallelism`
-- `phases` (`phase`, `durationSeconds`, `shareOfPhaseTotalPct`), `hotspots` (`category`,
-  `name`, `durationSeconds`, `count`), and `mnemonics` (`mnemonic`, `count`, `totalSeconds`,
-  `meanSeconds`, `maxSeconds`, `shareOfActionTimePct`) when present on the profile, bounded to
-  the top entries so `repo_fetch`, `starlark`, `package_creation`, and dominant mnemonics are
-  immediately visible
+- `phases` (`phase`, `totalSeconds`), cumulative across threads; `hotspots` (`kind`, `name`,
+  `totalSeconds`, `maxSeconds`, `count`); and `mnemonics` (`mnemonic`, `count`, `totalSeconds`,
+  `maxSeconds`, `shareOfActionTime`) when present, bounded to the top entries.
+  `shareOfActionTime` is a fraction of `actionTimeSeconds`, not a percentage of wall time.
+  Hotspot `maxSeconds` is the longest single occurrence; `totalSeconds` sums all occurrences,
+  which may overlap. Nested repository and Starlark hotspots can describe the same work;
+  do not add them together.
 - `insights`, whose records expose `id`, `category`, `severity`, `title`, `rationale`,
   `recommendation`, `potentialSavingsSeconds`, `potentialSavingsPercent`, `confidence`, and
   `caveats`
@@ -454,8 +458,9 @@ Queried via the infrastructure tools, scoped to a build's time window (±2 minut
 - Blob size distribution
 - Disk eviction insertion age (historical block data; current discard activity
   and retention remain unknown without an independent counter/timestamp)
-- Hash table occupancy and health
-- Eviction rates over time
+- Hash-table pressure signals, when the rows carry the documented unit and aggregation;
+  a sampled peak does not establish occupancy or sustained pressure
+- Eviction-set operation rates, which do not establish block discard activity
 
 ### Service Mesh Metrics
 - Per-service request rates
@@ -589,22 +594,27 @@ them. A `device_size_unknown` entry needs the actual raw device size before calc
 - `keyLocationMapMaximumGetAttempts`: 16 (recommended). Controls hash slot probes before
   declaring a miss. Unset or zero makes every lookup probe one slot.
 - `keyLocationMapMaximumPutAttempts`: 64 (recommended). Unset or zero silently drops every insert.
-- Size it at **2-10x the expected live object count** (`usable bytes / average blob size`).
+- The 2-10x expected live object count rule is a planning heuristic, not a verdict
+  on the configured map. Apply it only with a representative measured mean object size
+  and established object population or capacity, and state the uncertainty.
   In-memory maps cost ~64 bytes per entry of eagerly allocated heap; on-disk maps ~66 bytes
   per record, with the record count automatically rounded down to a prime (no need to
   pre-compute primes).
 - An undersized map fails **silently**: inserts displace older entries and eventually drop,
   so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`
-  and `hash_put_too_many_iterations` rows in `get_storage_health`; any sustained non-zero
-  value means the map is sized below the live object count. **The map and the blocks are
-  coupled** — growing the disk without growing the map makes eviction worse.
-- Can be stored in-memory (faster, lost on restart) or on block device (persistent).
+  and `hash_put_too_many_iterations` rows in `get_storage_health`; a positive peak with
+  the documented ops-per-second unit and peak aggregation shows pressure at some point,
+  not sustained pressure, resident count or a new map size. Assess map headroom when
+  considering additional block capacity, without assuming expansion will worsen eviction.
+- Can be stored in-memory (process-local) or on a block device; verify backing storage
+  and lifecycle before claiming persistence.
 
 **Persistence**: a store survives restarts only when three pieces survive together — the
-blocks, the key-location map, and the `persistent` state directory. A store with an
-in-memory key-location map restarts **empty** regardless of disk durability (and combining
-`persistent` with an in-memory map is a misconfiguration: blocks reattach full of
-unreachable data). `minimumEpochInterval` controls state sync frequency (default 300
+blocks, the key-location map, and the `persistent` state directory. Verify the mounted
+configuration and backing storage and lifecycle of each before claiming that a store
+survives a restart or reschedule. An in-memory map is process-local; it does not establish
+what happened on a particular historical restart or that the operator intended or accepted
+a cache-only design. `minimumEpochInterval` controls state sync frequency (default 300
 seconds), which also bounds crash loss to roughly that window. On SIGTERM, data is synced
 before shutdown (two full device syncs — give the pod enough termination grace).
 **Changing any block count or the blocks/device size changes the derived block size, and a
