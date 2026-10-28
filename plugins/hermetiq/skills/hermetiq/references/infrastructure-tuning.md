@@ -78,18 +78,17 @@ alone covers every store):
 | `iscc_get_count_by_code`, `fsac_get_count_by_code` | count, total | The window's Gets by `labels.grpc_code` |
 | `iscc_get_found_pct`, `fsac_get_found_pct` | percent, derived | OK / (OK + NotFound): the share of lookups that found an action's previous execution statistics (ISCC) or a file access profile to prefetch (FSAC). Never a verdict input or a sizing signal: a new action is always NotFound, and neither share measures time saved |
 | `<type>_operation_count`, `<type>_error_count` | ops/sec, average | The numerator and denominator behind the rate |
-| `cas_blob_size_{p50,p90,p99}` | bytes, average | CAS only; the AC stores fixed-shape messages |
 | `eviction_age` | hours, instant | Raw `min()` across the eviction-age rule |
 | `eviction_age_by_shard` | hours, instant | Per shard, in `labels.kubernetes_shard` |
 | `eviction_age_min_shard` | hours, derived | Minimum shard insertion age; historical context, not a current retention verdict |
 | `cas_blob_size_p50/p90/p99` | bytes, bucket_bound | **A histogram bucket boundary, not a measurement.** Quote the row's `lowerBound` and `upperBound` labels; when that bucket is wide the distribution simply cannot be resolved more precisely |
 | `cas_blob_size_buckets` | count, per `le` | The raw cumulative histogram, if you want the shape rather than a percentile |
 | `evictionActivity` / `retentionAssessment` | status | Unknown without a discard counter/timestamp. The older eviction_observed_in_window age-versus-window heuristic was invalid |
-| `device_io_utilization` | ratio, node-level | Fraction of wall time the block device was busy. Near 1 the disk is the constraint whatever capacity remains |
+| `device_io_utilization` | ratio, node-level | Fraction of wall time the shared node device was busy. A high value is consistent with device pressure, but does not alone establish the cause of store latency |
 | `device_write_latency` | milliseconds, node-level | Device write service time. A storage `put` latency climbing while error rates stay at zero looks like this from underneath |
 | `device_write_throughput` | bytes_per_second, node-level | Bytes written to the device |
 | `device_queue_depth` | count, node-level | In-flight device requests |
-| `hash_{get_too_many_attempts,put_too_many_iterations,put_ignored_invalid}` | ops/sec, peak | Key-location-map saturation |
+| `hash_{get_too_many_attempts,put_too_many_iterations}` | ops/sec, peak | A positive sampled peak indicates key-location-map pressure at some point; it does not establish sustained pressure or resident object count |
 | `eviction_set_ops` | ops/sec, instant | Eviction-set activity by service and cache name. The recording rule is named `rate1h`, but that names the rule's lookback, not the result's unit — it is a per-second rate like every other rate row here, and reading it as per-hour overstates eviction pressure 3600-fold. It carries no `storage_type` dimension, so `storageType` does not restrict it and it stays cluster-wide |
 
 Two reading caveats:
@@ -101,21 +100,20 @@ Two reading caveats:
 - **The `device_` rows describe the node, not the store.** They come from node metrics for the
   nodes hosting the storage pods, so they cover everything scheduled onto those nodes and are
   shared-infrastructure evidence rather than one tenant's. They are absent when the deployment
-  does not grant Pod reads, in which case the payload says so. They are the rows that separate
-  "the cache is too small" from "the disk cannot absorb the writes" — a question the storage
-  rows alone cannot answer.
+  does not grant Pod reads, in which case the payload says so. High utilization and write
+  latency are consistent with disk pressure, but window-wide reductions do not identify when
+  pressure occurred or prove the cause of a store-specific latency change.
 - **Prefer `eviction_age_min_shard` over `eviction_age`.** The recording rule can carry
   series with no `kubernetes_shard` label, and `min()` will happily return one. On a live
   cluster a shardless series read 8 minutes while every real shard read 67 to 107 hours.
-  Only shard-labeled series describe a shard, which is what actually bounds retention.
-- **Sanity-check the blob-size percentiles.** They come from `histogram_quantile` over
-  averaged bucket rates, so coarse buckets inflate them. A p50 in the tens of megabytes is a
-  bucket artifact, not a typical Bazel blob. Say so rather than sizing against it.
+  Only shard-labeled series describe a shard. Neither row establishes current retention.
+- **Read blob-size buckets as bounds.** Coarse buckets do not resolve the distribution within
+  the bucket; do not use the boundary as the mean blob size or to calculate object count.
 - **Breakdown metrics omit zero-valued rows.** `<type>_operations_by_op`, `eviction_set_ops`,
   `server_handled`, `top_codes`, `completed_by_code`, `platform_breakdown`, and
-  `service_breakdown` return only series that actually fired. An absent row means that
-  combination never occurred in the window, not that telemetry is missing. Single unlabeled
-  gauges keep their zeros, because there zero is the answer.
+  `service_breakdown` omit zero series. An absent row does not by itself establish that
+  the combination never occurred: check telemetry coverage and truncation. Single unlabeled
+  gauges keep their zeros when the series was observed.
 
 **How to assess if storage is undersized**:
 1. `eviction_age_min_shard` is derived from `last_removed_old_block_insertion_time`:
@@ -125,26 +123,28 @@ Two reading caveats:
    Treat eviction activity and current retention as unknown without a discard
    counter/timestamp. Independent evidence should cover the cache reuse interval,
    not merely one build's duration; insertion age alone cannot size the store.
-2. `get_cache_trends`: `CACHE_EVICTED` miss reason rate. If significant, storage is the bottleneck.
-3. Hash-table **saturation rates** (not counts) — any sustained nonzero
-   `hash_put_too_many_iterations` or `hash_get_too_many_attempts` means the key-location map
-   is silently dropping index entries; blobs stay on disk but become unreachable. These
-   counters reset on restart, so a quiet dashboard right after a deploy proves nothing.
+2. `get_cache_trends`: inspect classified `CACHE_EVICTED` misses and their aligned population.
+   Corroborate reuse demand and missing blobs before attributing a regression to storage size.
+3. A positive `hash_put_too_many_iterations` or `hash_get_too_many_attempts` peak with the
+   documented ops-per-second unit records key-location-map pressure at some point in the
+   window. It does not establish sustained pressure or resident object count. Zero sampled
+   pressure does not prove sufficient capacity.
 
 **Sizing guidance**:
 
 | Signal | State | Recommendation |
 |--------|-------|----------------|
 | Insertion age alone, high or low | Retention unknown | Establish actual discard activity and reuse demand before sizing |
-| Any nonzero hash-table saturation rate | Key-location map undersized | Grow entries/`sizeMi` (bb-storage auto-rounds the count to a prime); grow the memory request for in-memory maps |
-| High FindMissing rates | Clients re-checking existence | Enable existence caching on frontend |
+| Positive hash-table pressure peak | Pressure occurred at some point | Inspect the mounted map configuration and corroborating time-resolved evidence before proposing a change |
+| High FindMissing rates | Clients re-checking existence | Inspect existence-cache hit and stale-result evidence before recommending a TTL or other change |
 
-**Key-location map sizing**: aim for **2-10x the expected live object count**
-(`usable bytes / average blob size`; read the distribution from `cas_blob_size_p50`, subject
-to the bucket-artifact caveat above).
+**Key-location map sizing**: estimate expected live object count only from independently
+measured object-count or mean-size evidence; a percentile bucket boundary cannot supply a
+mean or a resident object count.
 In-memory maps cost ~64 bytes per entry of eagerly allocated heap;
-on-disk maps ~66 bytes per record. **The map and the blocks are coupled: growing the disk
-without growing the map makes eviction worse, not better.**
+on-disk maps ~66 bytes per record. The map and blocks are coupled: additional block capacity
+can increase the number of live objects the map needs to index, so assess map headroom alongside
+a proposed disk expansion. Do not claim an expansion will worsen eviction without evidence.
 
 **Block configuration tradeoffs** (from analyze_buildbarn_storage, get_buildbarn_config, or supplied Jsonnet):
 - `oldBlocks`: More = better least-recently-used approximation but more I/O overhead from
@@ -164,8 +164,9 @@ ceiling with measured blob sizes and their coverage, since P99 alone does not pr
 
 > **Geometry changes flush persistent stores.** Changing `spareBlocks`/`oldBlocks`/
 > `currentBlocks`/`newBlocks` or the blocks/device size changes the derived block size, and a
-> persistent store discards ALL of its data on the next start. A store with an in-memory
-> key-location map restarts empty regardless. Plan geometry changes as scheduled cache flushes.
+> persistent store discards ALL of its data on the next start. An in-memory key-location map
+> is process-local; inspect the mounted configuration and backing storage before describing
+> the result of a particular restart. Plan geometry changes as scheduled cache flushes.
 
 ### Sharding
 
@@ -202,8 +203,10 @@ and memory.
    Use measured CPU/wall efficiency plus queueing and resource pressure before
    changing concurrency.
 2. `list_buildbarn_events`: out-of-memory kills → concurrency × per-action memory exceeds limit.
-   Records come back newest first with `hasMore` reporting whether older matches in the window
-   were left out, so raise `limit` or narrow `timeRange` rather than concluding from a full page.
+   Follow `nextOffset` while `hasMore` is true, preserving filters and using the returned
+   `start` and `end` as `startTime` and `endTime`, or the same completed `invocationId`.
+   A repeated relative `timeRange` moves the window. Disclose coverage limitations and
+   unread pages; newly ingested or equal-timestamp records can still shift page boundaries.
 3. High execution time variance within the same mnemonic → resource contention.
 
 **Starting point**: `concurrency = vCPU count - 1` (headroom for the worker process).
@@ -247,10 +250,11 @@ platform properties (operating system family, container image, instruction set a
 **Diagnosing platform issues**:
 1. `get_scheduler_health` shows per-platform breakdown
 2. One platform with long queue waits (`queueP90Seconds`, `queueP99Seconds`) while others are
-   idle → that platform is under-provisioned or scaling late. Depth alone is not evidence: a
-   burst queues deep and drains within minutes
-3. A `stalled` platform → no worker served it for 10 minutes: its pool is at zero and not
-   scaling, unavailable, or advertising different platform properties
+   idle → investigate that platform; capacity and late scaling are hypotheses until supported
+   by time-aligned evidence. Depth alone is not a verdict: a burst can queue and drain quickly.
+3. A `stalled` platform means queued work persisted through a 10-minute stretch while
+   nothing executed. Investigate pool availability, scaling, and platform matching; the
+   verdict alone does not identify which caused it.
 4. `platformQueueWithNoWorkersTimeout` (default 900 seconds) — queues with no workers are
    removed after this duration
 
@@ -271,11 +275,11 @@ Two failure signatures distinguish a property mismatch from an image mismatch:
 
 | Bazel outcome | Remote executions | Meaning |
 |---------------|-------------------|---------|
-| `REMOTE_ERROR` (exit 34) | zero | No worker advertises the requested platform. Nothing matched; no queue served it. |
-| `BUILD_FAILURE` | nonzero | The platform matched and actions ran, then failed inside the worker's userspace. |
+| `REMOTE_ERROR` (exit 34) | zero | Remote failure; require an explicit no-matching-workers message and requested platform before diagnosing a matching failure. |
+| `BUILD_FAILURE` | nonzero | Actions ran and failed; require loader or exec error evidence before diagnosing a userspace mismatch. |
 
-Watching `REMOTE_ERROR` flip to `BUILD_FAILURE` across a config rollout is the fingerprint of an
-advertised property being bumped without the runner image being bumped with it. See the
+A change from `REMOTE_ERROR` to `BUILD_FAILURE` does not by itself identify why either failed.
+Use the failure messages, requested platform and action logs to establish the cause. See the
 `container-image` subsection under bb-runner in `REFERENCE.md` — the property is only a matching
 key, never an image Buildbarn pulls.
 
@@ -327,20 +331,22 @@ For a known invocation with remote execution enabled:
    unproven; an explicit scale-events-unavailable field is a coverage caveat,
    not evidence that no scale event occurred. When `data.scaleEventsStatus` is
    `available_separately` and `list_buildbarn_events` is listed, call it with the
-   same `invocationId` so both tools use the same padded window. Correlate event
-   and replica timestamps, but do not infer event-to-replica causality from
-   timestamp alignment alone.
+   same `invocationId` so both tools use the same padded window. For subsequent
+   pages, preserve the filters and reuse the same completed `invocationId`, or
+   the returned `start` and `end` as `startTime` and `endTime`. Disclose unread
+   pages and coverage limitations; ingestion or equal timestamps can shift page
+   boundaries. Correlate event and replica timestamps, but do not infer
+   event-to-replica causality from timestamp alignment alone.
 
 | Pattern | Supported conclusion |
 |---------|----------------------|
-| Low executing parallelism + low queueing | Graph, lack of ready remote work, or a long action is likely limiting |
-| Low executing parallelism + high queue duration | Scheduler/worker capacity is likely limiting; the scheduler executing gauge corroborates activity but does not quantify slots |
-| Long initial queue + fixed low concurrency plateau + later stepwise ramp | Capacity arrived late; slow autoscaling is plausible |
-| Scheduler `scaling_lag`: a p99 tail above 60 s whose serving pool scaled up, was ready within 10 minutes, and was not `capacityLimited` | Healthy: capacity arrived late and caught up; `scaleUp.phases` says whether nodes or image pulls are the delay |
-| Scheduler `tail_latency` with `scaleUp.slow` | The scale-up took more than 10 minutes; fix the dominant phase |
-| Scheduler `congested` or `saturated` with `scaleUp`, as when a pool scales up from zero | Part of the wait was capacity arriving late; the verdict stands, and `scaleUp.phases` says which phase to fix |
-| Scheduler `tail_latency`, `congested`, or `saturated` with `capacityLimited` | The pool ran every slot at `maxReplicas`; more workers or a higher maximum is the remedy |
-| One worker handles most actions while several others handle only a small tail | Later worker participation supports the late-capacity hypothesis |
+| Low sampled executing parallelism + low queueing | Graph, lack of ready remote work, or a long action are hypotheses; samples can miss peaks and do not exclude a capacity benefit |
+| Low sampled executing parallelism + high queue duration | Scheduler/worker capacity is a hypothesis; queue intervals can include earlier attempts and the scheduler executing gauge does not quantify slots |
+| Long initial queue + fixed low concurrency plateau + later stepwise ramp | Late capacity is plausible; confirm timing with aligned queue and replica history |
+| Scheduler `scaling_lag` | Degraded: a wait tail and qualifying late scale-up occurred in the window. Co-occurrence does not prove causation or exclude backlog |
+| Scheduler `tail_latency`, `congested`, or `saturated` with `scaleUp` | The wait and scale-up occurred in the window; align queue, replica and relevant event timelines before attributing cause |
+| A pair with `capacityLimited` | The executing peak reached its slot ceiling; investigate whether a higher maximum would address the measured bottleneck |
+| One worker handles most actions while several others handle only a small tail | Participation alone does not establish when capacity arrived or how many workers were available |
 
 The long-initial-queue and single-worker patterns do not prove autoscaler
 behavior. `list_worker_pools` is a live desired/available snapshot, and
@@ -360,18 +366,19 @@ by `snapshotAt`, is a broken trigger: fix the trigger's metric query or its cred
 the pool cannot scale until then. KEDA's `Ready` False alone, `FailedScheduling` while a node
 is added, and KEDA reconcile errors are transient, not autoscaler faults.
 
-Whenever `get_scheduler_health` returns `platformAssessments[].scaleUp`, whatever the
-verdict, its `phases` already split a scale-up into those parts, from the pool's own pod
-events. Fix the phase that dominates rather than the worker count; add workers or raise the
-maximum only for a `capacityLimited` pair or a backlog that outlasted the scale-up:
+Whenever `get_scheduler_health` returns `platformAssessments[].scaleUp`, report ready lag
+with its `stepSeconds` uncertainty and each available phase with its own pod count. Node wait,
+image pull and startup medians can cover different populations, and cannot partition ready
+lag or establish its dominant cause. Inspect relevant events and aligned timelines before
+selecting a remedy. The following are investigation leads, not diagnoses:
 
-| Dominant phase | What it means | Remedies |
+| Phase | What to investigate | Possible remedies when supported |
 |----------------|---------------|----------|
-| Node wait (`nodeWaitMedianSeconds`) | New pods were unschedulable until the cluster autoscaler or Karpenter added a node | Keep warm node headroom on the worker node pool: low-priority placeholder pods that real workers preempt, or a node-pool minimum during working hours; a higher pool `minReplicas` holds warm workers at the cost of idle capacity |
-| Image pull (`imagePullMedianSeconds`, `slowestImage`) | Each new node pulled the runner image cold | Preload the image on worker nodes (a pre-pull DaemonSet, or the cloud's node-image or secondary-disk preload on GKE, EKS, or AKS), serve it from a registry close to the cluster with lazy or streamed pulls where supported, or slim the runner image |
-| Startup (`startupMedianSeconds` well above the pull) | Containers were slow to start after their images arrived | Inspect init containers and the worker's readiness with `list_buildbarn_events` and `get_buildbarn_pod_logs` |
+| Node wait (`nodeWaitMedianSeconds`) | Whether scheduling or node supply delayed affected pods | Keep warm node headroom on the worker node pool: low-priority placeholder pods that real workers preempt, or a node-pool minimum during working hours; a higher pool `minReplicas` holds warm workers at the cost of idle capacity |
+| Image pull (`imagePullMedianSeconds`, `slowestImage`) | Whether image pulls delayed affected pods | Preload the image on worker nodes (a pre-pull DaemonSet, or the cloud's node-image or secondary-disk preload on GKE, EKS, or AKS), serve it from a registry close to the cluster with lazy or streamed pulls where supported, or slim the runner image |
+| Startup (`startupMedianSeconds`) | Startup includes image pulls; inspect per-pod evidence to isolate other delays | Inspect init containers and the worker's readiness with `list_buildbarn_events` and `get_buildbarn_pod_logs` |
 
-More workers or a higher maximum do not shorten any of these phases.
+A change in worker count does not by itself establish a reduction in these phases.
 
 Keep causality partitioned in the report: Action Cache misses explain why work
 had to execute, queue metrics explain delay before execution, and execution
@@ -395,8 +402,10 @@ When builds get slower and the cause is not cache-related or code-related:
    `execution_stage_{p50,p90,p99}` for stage timing and the `rss_p90`, `cpu_*_p90`,
    `block_io_*_p90`, and `file*_p90` rows for resource ceilings.
    Use `list_buildbarn_events` for out-of-memory kills during the build window when listed.
-   Records come back newest first with `hasMore` reporting whether older matches in the window
-   were left out, so raise `limit` or narrow `timeRange` rather than concluding from a full page.
+   Follow `nextOffset` while `hasMore` is true, preserving filters and using the returned
+   `start` and `end` as `startTime` and `endTime`, or the same completed `invocationId`.
+   A repeated relative `timeRange` moves the window. Disclose coverage limitations and
+   unread pages; newly ingested or equal-timestamp records can still shift page boundaries.
 4. **Scheduler**: `get_scheduler_health` → Queue waits (p90, p99) longer for a specific
    platform? Any pair with `backlogExcess`, or `stalled`?
 5. **Network**: `get_grpc_health` → Error rates or latencies elevated between components?
@@ -409,10 +418,10 @@ When builds get slower and the cause is not cache-related or code-related:
 
 | Metric | Threshold | Action | Expected Impact |
 |--------|-----------|--------|-----------------|
-| Scheduler `congested` or `saturated` (queue wait 90th percentile > 60 seconds, or a 10-minute backlog) | Outlasting the pool's scale-up, or `capacityLimited` | Add workers or raise `maxReplicas` for the affected platform | Reduces queue wait proportional to workers added |
-| Eviction age < 4 hours | Sustained trend | Increase disk and key-location map together, or add a storage shard | Reduces `CACHE_EVICTED` misses |
+| Scheduler `congested` or `saturated` | Queue waits cross the server's assessment thresholds | Align queue, replica, and event evidence before proposing capacity changes | Potentially reduces wait if capacity is the measured limit |
+| Eviction insertion age | Any value | Establish discard activity and reuse demand before sizing | Current retention remains unknown without independent evidence |
 | Measured CPU saturation plus action contention | Sustained during comparable builds; CPU seconds alone are insufficient | Validate worker concurrency and capacity | Can reduce execution time variance |
 | Worker memory > 80% | With out-of-memory kills | Increase worker memory limits | Eliminates out-of-memory action failures |
-| Storage Get 90th percentile > 100 milliseconds | Sustained | Increase key_location_map; check disk I/O | Reduces input fetch and cache lookup times |
+| Storage Get latency increases | Comparable, time-aligned evidence | Investigate serving latency, node I/O and map pressure before choosing a change | Identifies possible bottlenecks |
 | Service mesh error rate > 1% | Any sustained period | Investigate specific error codes | Reduces action failures and retries |
-| Fleet slot utilization (`activity.slotUtilization`) < 30% | Sustained over 7+ days | Reduce fleet size or improve autoscaler | Reduces infrastructure cost |
+| Low fleet slot utilization (`activity.slotUtilization`) | Comparable time-resolved workload and capacity evidence | Investigate minimum capacity and demand peaks before changing the fleet | May reveal cost opportunities; do not infer savings without pricing |

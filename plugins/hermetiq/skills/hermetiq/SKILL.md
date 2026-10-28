@@ -161,10 +161,11 @@ Available prompts include `debug_cache_misses`, `analyze_invocation`,
 `infra_health`, `analyze_storage_config`, `storage_optimization`, and
 `setup_hermetiq_bazel`. Use a prompt when it matches the user's intent; otherwise
 call the tools directly. Their arguments are: `invocation_id` for
-`analyze_invocation`, `debug_cache_misses`, `diagnose_exec_environment`,
-`infra_health`, `investigate_failure`, and
-`test_failures`; `lookback` plus `repository`, `command`, `pattern`, `branch`,
-and `user` for `cache_trends`, `compare_periods`, `find_slow_builds`,
+`analyze_invocation`, `debug_cache_misses`, `investigate_failure`, and
+`test_failures`; optional `invocation_id` and `lookback` for
+`diagnose_exec_environment`; optional `invocation_id` and `time_range` for
+`infra_health`; `time_range` for `cost_analysis`; `lookback` plus `repository`,
+`command`, `pattern`, `branch`, and `user` for `cache_trends`, `compare_periods`, `find_slow_builds`,
 `project_health`, `rbe_optimization`, `rbe_trends`, and `weekly_trends_report`
 (`profile_trends` adds `status`); `store` and `time_range` for
 `analyze_storage_config`; `store` and `lookback` for `storage_optimization`; and `directory` for `setup_hermetiq_bazel`. The
@@ -195,12 +196,15 @@ context and likewise are not tool calls.
   cannot be reapplied as a complete configuration. Oversized documents fail instead of
   returning a silently cut export. `RENDER_FAILED` and `SCHEMA_UNKNOWN` are distinct
   from `VALIDATION_FAILED`; only `VALIDATED_PASS` proves requested schema validation.
-- Infrastructure event and pod-log pages use `offset`/`nextOffset` with the same
-  invocation and filters. Read `coverageLimitations`; no events does not prove no
-  scaling. Coarse worker timelines can miss changes between samples.
+- Infrastructure event and pod-log pages use `offset`/`nextOffset`. For event
+  pagination, freeze the returned `start` and `end` as `startTime` and `endTime`,
+  or reuse the same completed invocation, and preserve filters. Read
+  `coverageLimitations`; no events does not prove no scaling. Coarse worker
+  timelines can miss changes between samples.
 - Missing `failureMessage`, retry metadata or aggregates is unavailable evidence.
   A failed test can have no failed action row. Inspect test verdicts and bounded logs;
-  an artifact URL alone is not the underlying failure text.
+  an artifact URL alone is not the underlying failure text. Skipped tests and a
+  failed target do not by themselves establish a dependency or blast radius.
 
 ## Project, Build, and Invocation Context
 
@@ -241,6 +245,11 @@ context and likewise are not tool calls.
   `exitCode` is absent, not 0, whenever the backend recorded none. No `status`
   filter can select `unknown`, so a filtered count can add up to less than the
   unfiltered total — say so rather than calling it a discrepancy.
+- When `telemetryIncomplete=true`, final build events did not arrive. Omitted execution
+  and cache counters are unknown, and the end time/duration may be inferred.
+  Independently recorded remote actions or test results can extend beyond that
+  inferred end; preserve their timestamps instead of discarding them or treating
+  the inferred duration as an exact performance baseline.
 - Per-build `BuildSummary` objects returned by `list_builds`, `get_build`, and
   `get_build_details` carry five counts that together account for
   `invocationCount`: `successCount`, `failureCount`, `interruptedCount`,
@@ -342,7 +351,7 @@ context and likewise are not tool calls.
 | What should I fix in this invocation? | `resolve_build_or_invocation`, `get_invocation_insights` | Validate `affectedItems` with `find_actions`, `find_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
 | Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop when those three calls answer the request |
 | Slow known invocation | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | When remote execution is enabled: `get_project`; only when completed action logging is enabled, `analyze_remote_execution` and `get_build_parallelism`; `get_scheduler_health` and `get_worker_scaling_timeline` when listed |
-| Cache misses | `summarize_cache_events` | `group_cache_events`, `find_cache_events(includeMissAnalysis=true)` |
+| Cache misses | `group_cache_events(hit="miss")`, then `summarize_cache_events` and `get_invocation(includeCommandLine=true)` | `find_cache_events(includeMissAnalysis=true)` only when miss groups exist |
 | Failed build | `resolve_build_or_invocation`, `get_build_details` or `get_invocation` | `find_actions(result="failed")` — read `data.aggregations` and the rows' `supersededBySuccessfulAttempt` evidence first, then `get_action_execution` only when mixed signatures or missing details leave the cause unresolved |
 | Build failure output / "what did Bazel actually print?" | `get_build_logs` | `find_actions(result="failed")`, `get_action_execution` |
 | Remote actions fail with loader errors (`GLIBC_x.y not found`, missing shared object or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command` for the requested platform, `list_builds` for the regression boundary; run the Remote Execution Environment Mismatch playbook |
@@ -352,14 +361,14 @@ context and likewise are not tool calls.
 | Time-period comparison | `summarize_project_trends` | `get_remote_action_trends`, `get_cache_trends`, `get_target_trends` |
 | Infrastructure bottleneck | `summarize_infrastructure_health` | `get_scheduler_health`, `get_storage_health`, `get_worker_fleet_health`, `get_grpc_health`, `get_buildbarn_status` to establish the topology the metrics describe |
 | "What Buildbarn do I have / is it up?" | `get_buildbarn_status` | `list_worker_pools`, `get_buildbarn_config`; the user may have no cluster access, so never answer this from kubectl |
-| Cost reduction | `get_remote_action_trends(lookback="30d")` | `analyze_remote_execution`, `get_cost_summary` |
+| Cost reduction | `get_cost_summary` when listed | Use remote-action or infrastructure evidence only when relevant and available; do not infer costs from performance telemetry |
 | Remote action detail | `group_remote_actions` | `find_remote_actions`, `get_remote_action_command` |
 | Target trends | `get_target_trends` | `get_target_trend_detail`, `list_targets` |
 | Filter discovery | `list_filter_values` | Supported `field` values are `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status`, `tag`, `user`; patterns are intentionally not exposed for high-cardinality lookup. `field="status"` returns lowercase values with `scope="static_vocabulary"`; `field="tag"` returns structured `tags[]` with key/values, `fieldName="tag"`, and `scope="project"`. Both omit counts and `effectiveWindow` and reject `includeCounts=true`; they are not windowed facets. Every returned status value is accepted by `list_builds` and `list_invocations` |
 | Project activity | `get_project_activity` | `summarize_project_trends`, `summarize_build_history` |
 | Build configuration audit | `list_invocations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`, `find_cache_events` |
 | Storage configuration audit / sizing | `analyze_buildbarn_storage` (or `get_buildbarn_config` only if present) | `get_storage_health`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
-| "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Four rows carry the tuning signal and each points at a different cause: `eviction_age_min_shard` (historical insertion age, not proof of current retention), `hash_get_too_many_attempts` and `hash_put_too_many_iterations` (key-location map sized below the object count), and the `cas_`/`ac_error_rate_pct` pair, which are the only rows meaning something is broken rather than small — quote the operation counts beside them, because a near-idle store shows an alarming ratio over a handful of requests. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say the configuration is adequate for the observed load. The `storage_optimization` prompt runs this end to end |
+| "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Read serving latencies and blob-size histogram bounds, shared node-wide device rows, and serving error rates with their operation counts. `hash_get_too_many_attempts` and `hash_put_too_many_iterations` indicate key-location-map pressure only with the documented `ops_per_second` peak unit and aggregation; a positive peak neither proves sustained pressure nor gives resident count or a new map size. `eviction_age_min_shard` is historical insertion-age context, not a sizing signal or proof of current retention. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say sizing and the need for a change remain unproven; a healthy assessment does not establish adequate sizing. The `storage_optimization` prompt runs this end to end |
 | Hermetiq setup | `setup_hermetiq_bazel` prompt | Local `.bazelrc` follow-up only when the client has file access and the user approves edits |
 
 For cache, remote action, and target analysis, start grouped, then drill down:
@@ -399,7 +408,10 @@ mnemonics, phases, or flags.
 - An empty `data.insights` is not a clean build. Read `data.noInsightsReason`: when it is set,
   the list is empty because no profile was measured — a build still running, or one that never
   captured one — and reporting the build as clean is wrong. Empty with no reason does mean the
-  profile was analyzed and nothing was flagged.
+  profile was analyzed and no current rule flagged it, not that no optimization is possible.
+  If final events were lost, check the effective command line before suggesting profiling
+  flags: an invocation can already have both profiling flags enabled and still lose the
+  uploaded profile. Recommend investigating event/profile delivery, not adding the same flags.
 - Rank by kind before magnitude. A correctness insight such as `disk_cache_with_remote_execution`
   describes a build that can fail later and leads regardless of duration; performance insights
   follow. `estimatedSavings` is now absent from almost every insight, so ordering by the
@@ -504,6 +516,20 @@ or Bazel's local disk-cache counters. A zero-hit result explains why remote work
 had to execute, but a like-for-like cold-build comparison is still required to
 decide whether cache misses explain an unusual regression.
 
+When the observed lookup denominator is zero, the hit rate is undefined even if
+the response encodes `hitRate=0`; say no remote cache lookups were observed. A
+warm local no-op can have local action-cache hits and no remote lookups or remote
+executions while remote execution is enabled. Do not diagnose cache failure or
+worker underutilization from that absence. Treat rates from only one or two
+lookups as small samples rather than fleet-wide cache health.
+
+A cached passing test is a reused result for its declared action inputs. State
+that the test did not re-execute, but do not call current-code verification
+invalid without evidence of undeclared inputs or another hermeticity defect.
+Keep test-result caching enabled for performance. A forced fresh run such as
+`--cache_test_results=no` is an optional verification experiment when the user
+needs re-execution, not a required repair merely because the cache worked.
+
 Every `hitRate` and `byteHitRate` in `get_cache_trends` — `summary`, `buckets`,
 `byMnemonic`, `topMissTargets`, and the heatmap — is a fraction from 0 to 1,
 matching the identically named fields in `summarize_cache_events` and
@@ -531,7 +557,7 @@ Miss reason guidance:
 | `PLATFORM_CHANGED` | Execution platform properties changed | Standardize platforms and remote execution properties |
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
-| `CACHE_EVICTED` | Storage too small or retention too short | Corroborate missing blobs and cache reuse intervals; insertion age alone cannot prove retention or eviction activity. Size disk and key-location map together only when capacity evidence supports it |
+| `CACHE_EVICTED` | A previously tracked entry was unavailable; insufficient storage or short retention are hypotheses | Corroborate missing blobs and cache reuse intervals; insertion age alone cannot prove retention or eviction activity. Assess disk capacity and key-location-map pressure separately before recommending changes |
 | `NEVER_CACHED` | No prior tracked hit in the retained lookup window | For one invocation, read `summarize_cache_events` `data.workloadHistory`: `priorExposure` `CACHE_PRIOR_EXPOSURE_COLD` means nothing in the workload or its repository could have warmed the cache, so the misses are the expected cold start. Otherwise the cause stays unknown until a matched baseline or per-action diff explains it |
 | `INSUFFICIENT_TRACKED_HISTORY` | The tracked lookback did not reach far enough back to see a prior entry | Widen the comparison window before treating the miss as new work |
 | `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Not classifications: the miss was never classified, is still queued for enrichment, or enrichment gave up | Report the window as unclassified and assign no cause. None of these is accepted as a `reason` filter |
@@ -540,6 +566,10 @@ If `INPUT_CHANGED` dominates for one mnemonic or target, call
 `find_cache_events(includeMissAnalysis=true)` and inspect the input, command,
 environment, platform, and output-path diffs. Use `get_remote_action_command` with an
 action digest when command arguments or environment need confirmation.
+One target/mnemonic can cover multiple action roles, such as a long test run
+and later test-XML generation. Match the miss's digest, command and output role
+to the expensive action before saying it caused that action to rerun; a changed
+input on the XML action alone does not explain the test execution miss.
 
 ### Remote Execution Efficiency
 
@@ -563,29 +593,34 @@ causal questions separate: Action Cache misses establish why work executed,
 queue metrics establish delay before execution, and execution duration
 establishes action cost. None of those alone explains the other two.
 
-| Phase | Healthy | Warning | Critical | Usually means |
-|-------|---------|---------|----------|---------------|
-| Queue | <2s | 2-10s | >10s | Worker capacity or a late scale-up |
-| Input fetch | <5s | 5-30s | >30s | Large inputs or storage contention |
-| Execution | mnemonic-dependent | >2x median | >5x median | Slow action or resource contention |
-| Output upload | <5s | 5-20s | >20s | Large outputs or storage bottleneck |
+Compare queue, input fetch, execution, and output upload timings for the same
+action set before ranking phases. A long phase suggests a question to investigate,
+not a proven cause: queue intervals can include earlier attempts, and slow fetch
+or upload alone does not establish storage contention. Compare execution against
+matched actions or an appropriate mnemonic baseline. A low median wait and a
+high maximum can show a skewed distribution, but do not rule out sustained
+backlog; use time-aligned queue evidence to assess that question.
 
 Read response fields under `data` by their proto-JSON (camelCase) names, which
 is what the server emits: `stats`, `slowestActions`, `expensiveTargets`, `queueWaitStats`,
 `ioHotspots`, `workers`, `cpuEfficiencyStats`, `cacheMissCandidates`, and
 `cacheSummary`. The snake_case proto field names do not appear in tool output.
-Note `workerInfo` is returned empty alongside a populated `workers` — use
-`workers`.
+Use `workers` for per-node action participation. `workerInfo` is separate host
+metadata and may be empty or enriched; do not assume the arrays align by index.
+A worker pod can execute several actions concurrently. One participating pod
+does not prove serialization; compare returned execution intervals for overlap.
+Test-result `attempt` counts are not remote scheduler attempt history.
+`cacheSummary.repeatedActions=0` means no successful uncached repeat attempts;
+it does not establish that no earlier failed remote attempt occurred.
 
 `expensiveTargets` ranks on accumulated action cost. When a deployment has no
 cost enrichment every row ties at zero, so treat a zero-cost `expensiveTargets`
 as unranked and use `slowestActions` and `stats` for the ordering instead.
 
-CPU efficiency:
-- >80%: good remote execution fit.
-- 40-80%: mixed; inspect I/O and memory pressure.
-- <40%: likely I/O-bound; consider local execution if local parallelism allows.
-- High `data.cpuEfficiencyStats[].ioBoundCount`: candidates for local execution or input/output reduction.
+CPU efficiency is CPU time divided by wall time. `ioBoundCount` classifies
+actions with a ratio below 0.5; it does not prove I/O is the cause or rule out
+CPU contention, sleeping, or synchronization. Inspect relevant evidence before
+recommending local execution or input/output changes.
 
 ### Parallelism and Critical Path
 
@@ -613,19 +648,28 @@ with no remote actions returns an **empty** series: that means no remote
 execution was observed, not zero concurrency, and it is never evidence of a
 capacity or graph limit — do not run the matrix below on an empty series.
 
+A single long action is an optimization candidate, not an irreducible floor.
+Unknown or unsupported test sharding does not rule out improving its algorithm,
+setup, runner, or dependencies. Verify existing shards, runner support and
+parallel critical-path headroom before projecting wall-time savings. Cached
+test-result durations can describe prior executions; do not mix them with fresh
+executions to declare the current run an outlier or normal without matching the
+measurement population and workload.
+
 | Observed evidence | Interpretation |
 |-------------------|----------------|
-| Low remote parallelism, low queue wait/depth, plateau below the client's CPU count | Build graph, lack of ready remote work, or one long action is the likely limit |
-| Remote parallelism flat at the client's CPU count with `--jobs` absent or `auto`, low queue wait, `remote_jobs_capped` reported | The client's `--jobs` is the limit; raise it for remote-execution builds and compare the next builds |
-| Low remote parallelism, high remote queue wait, and scheduler backlog | Scheduler or worker capacity is the likely limit, even when peak is far below `--jobs`; the scheduler executing gauge corroborates activity but is not a slot count |
-| Long initial queue, fixed low plateau, then stepwise concurrency and worker-participation growth | Capacity arrived late; slow autoscaling is a hypothesis |
+| Low remote parallelism and low queue wait/depth | Build graph, lack of ready remote work, or one long action are hypotheses; sparse samples do not establish a limit |
+| `--jobs` absent or `auto`, and `remote_jobs_capped` reported | The profile supports raising `--jobs` for this remote-execution build; do not compare sampled concurrency with an unknown numeric auto ceiling |
+| Low remote parallelism, high remote queue wait, and scheduler backlog | Scheduler or worker capacity is a hypothesis, even when the sampled peak is far below `--jobs`; the scheduler executing gauge corroborates activity but is not a slot count |
+| Long initial queue, fixed low plateau, then stepwise concurrency and worker-participation growth | Capacity arriving late and slow autoscaling are hypotheses until corroborated by a time-aligned replica timeline |
 | Peak remains near a numeric `--jobs` cap while scheduler capacity is healthy | The client cap may bind; test a higher value rather than assuming |
-| Peak reaches `--jobs` while scheduler queueing is high | Do not raise `--jobs`; it would add queue pressure without worker capacity |
+| Peak reaches `--jobs` while scheduler queueing is high | Queue pressure and the client ceiling both warrant investigation; sparse samples do not establish that added capacity cannot help |
 
 Never call slow autoscaling proven from scheduler aggregates, remote-action
-parallelism, or `list_worker_pools`. Proving controller delay requires a
-time-aligned desired/available/ready replica or scale-event timeline showing
-capacity arriving after queue growth. A scheduler pair's `scaleUp`, under any
+parallelism, or `list_worker_pools`. Corroborating late capacity requires a
+time-aligned desired/available/ready replica timeline showing capacity arriving
+after queue growth; replica and event timestamps alone do not establish a
+controller cause. A scheduler pair's `scaleUp`, under any
 verdict, is that replica evidence for its window: it is measured from the serving
 pool's desired and ready replica history, with pod event phases when available. It
 shows the platform's waits and the pool's late scale-ups in the same window, not that every
@@ -668,8 +712,8 @@ shared scale:
 | Overall | Component verdicts |
 |---------|--------------------|
 | `critical` | storage or gRPC `critical` (errors above 5%), workers `overloaded`, scheduler `stalled` |
-| `degraded` | scheduler `saturated`, `congested`, or `tail_latency`; workers `stressed`; storage or gRPC `degraded`; a component without telemetry |
-| `healthy` | `healthy`, `idle`, scheduler `scaling_lag` |
+| `degraded` | scheduler `saturated`, `congested`, `tail_latency`, or `scaling_lag`; workers `stressed`; storage or gRPC `degraded`; a component without telemetry |
+| `healthy` | `healthy`, `idle` |
 
 The scheduler judges queue waits per platform/size-class pair, and its verdict is the worst
 pair in `platformAssessments[]`, or the fleet-wide waits when no pair is labeled. Queue depth
@@ -683,12 +727,15 @@ saturated from depth.
 | `saturated` | p90 wait above 120 s, or some action stayed queued through a 10-minute stretch while work executed |
 | `congested` | p90 wait above 60 s |
 | `tail_latency` | p99 wait above 60 s with p90 at or below 60 s |
-| `scaling_lag` | A `tail_latency` that the serving pool's scale-up explains: ready within 10 minutes and not capacity-limited |
+| `scaling_lag` | A `tail_latency` classified alongside a serving pool scaling up within 10 minutes and not capacity-limited; the classification does not prove scale-up caused the wait |
 | `healthy`, `idle` | Anything else; `idle` when nothing was queued or executed |
 
 Each pair names its serving `pool`. `backlogExcess` means at least that many actions stayed
-queued through a 10-minute stretch. `capacityLimited` means the pair's `executingPeak` reached
-`slotCeiling`, the pool's `maxReplicas` × concurrency: the pool ran every slot at its maximum.
+queued through a 10-minute stretch. `capacityLimited` means the pair's sampled
+`executingPeak` reached `slotCeiling`, computed from each serving pool's `maxReplicas`
+or fixed replicas times its concurrency, summed across pools. It does not prove
+continuous occupancy. Do not call a pair capacity-capped when its sampled peak
+is below the ceiling unless other evidence establishes a different limit.
 Whatever the verdict, a pair whose serving pool's ready replicas trailed a rise in its desired
 replicas carries `scaleUp`: how often the pool's desired replicas rose, how long its ready
 replicas trailed them (`readyLagMedianSeconds`, `readyLagMaxSeconds`, measured to
@@ -697,21 +744,22 @@ available, `phases`: the median time new pods waited for a node, their slowest i
 Scheduled to the last container's first start (a restart does not count). `podsTruncated`
 marks phases taken over a sample of the newest pods.
 
-Report `scaling_lag` as healthy: capacity arrived late and caught up, or, with
-`scaleUp.catchingUp`, was still arriving at the window's end within the 10 minutes. Name its dominant phase
-as the improvement, never more workers or a higher maximum: a node wait calls for warm node
-headroom, an image pull for preloading or slimming the runner image. A `congested` or
-`saturated` pair with `scaleUp`, typical of a pool scaling up from zero, keeps its verdict, and
-its `assessmentReason` adds that the pool also added workers late: name the dominant phase
-there too. Recommend more workers or a higher maximum only for a `capacityLimited` pair or a
-backlog that outlasted the scale-up. A `stalled` pair means no worker served it: check its pool
-in `list_worker_pools` and its platform properties; see `references/infrastructure-tuning.md`.
+Report `scaling_lag` as degraded and quote its `assessmentReason`. The
+classification does not prove scale-up caused the queue wait. Align queue growth
+with desired, available, and ready replicas and relevant event timestamps before
+attributing delay to capacity arriving late. Pod startup phases cover different
+populations and cannot partition ready lag or establish a dominant cause. Treat
+node headroom or image-pull changes as hypotheses until corroborated; recommend
+capacity changes only when the evidence supports them. A `stalled` pair means no
+worker served it: check its pool in `list_worker_pools` and its platform
+properties; see `references/infrastructure-tuning.md`.
 
 `summarize_infrastructure_health` also returns `activity`. `mostly_idle` means executing
 actions averaged under half the worker slots (`slotUtilization`, `executingAverage` over
 `slotsAverage`) or, where slots are unmeasured, that most samples had nothing queued or
 executing (`idleShare`); otherwise it is `active`, or `unmeasured`. Activity never changes a
-verdict: report a mostly idle fleet beside its verdict, not in place of one.
+verdict: report a mostly idle fleet beside its verdict, not in place of one. A
+mostly idle window does not rule out saturation during a short burst.
 
 Judge autoscaling health from `list_worker_pools`, not from Kubernetes Warning events. A
 KEDA-scaled pool carries `scaledObject`, with KEDA's own `Ready`, `Active`, `Fallback`, and
@@ -766,11 +814,11 @@ remote-action concurrency and not a count of available worker slots or replicas.
 
 | Symptom | Tool | Metric to check | Action |
 |---------|------|-----------------|--------|
-| High queue time | `get_scheduler_health` | `queue_duration_{p50,p90,p99}`, `platformAssessments[]` (`backlogExcess`, `capacityLimited`, `scaleUp`), `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown`; `scheduler_queue_depth` as context | `stalled`: find why no worker served the pair. `congested` or `saturated`: scale or rebalance workers, raising the maximum when `capacityLimited`; with `scaleUp`, also fix the dominant phase, since part of the wait was workers still arriving. `tail_latency` with `scaleUp.slow`: fix the dominant phase. `scaling_lag`: healthy; improve capacity arrival from `scaleUp.phases` (node headroom or image pulls) rather than adding workers |
+| High queue time | `get_scheduler_health` | `queue_duration_{p50,p90,p99}`, `platformAssessments[]` (`backlogExcess`, `capacityLimited`, `scaleUp`), `retries_*`, `queued_rate`, `executing_rate`, `completed_by_code`, `platform_breakdown`; `scheduler_queue_depth` as context | `stalled`: investigate why no worker served the pair. For `congested`, `saturated`, `tail_latency`, or `scaling_lag`, correlate queue growth with replica and event timelines before attributing waits to capacity arrival or recommending a change; startup phases alone do not establish a dominant cause |
 | Autoscaler errors or Warning events | `list_worker_pools` | `scaledObject.conditions`, `scaledObject.scalingActive`, `unavailableSince`, `snapshotAt`, `scaledObjects` | Act on a condition that has held 10 minutes or more; scheduling and KEDA Warning events alone are transient |
 | Suspected late capacity | `get_scheduler_health` `scaleUp` (any verdict), then `get_worker_scaling_timeline` | `scaleUp` lag and phases; time-aligned desired, available, and ready replicas over the invocation window; scale-event coverage | Confirm whether replicas became ready after queue growth; absent/incomplete series leave autoscaling as a hypothesis |
 | Unknown or unverified deployment shape | `get_buildbarn_status` | `data.status`, `data.assessment`, `data.chart`, `data.storageShards`, per-component `role`/`kind`/`readyReplicas`/`images` | Establish what is installed before reading metrics; `storageShards` is what per-shard storage series key on, so it separates a real shard from a worker-local cache series |
-| Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Size disk and key-location map together; see `references/infrastructure-tuning.md` |
+| Storage load | `get_storage_health` | `data.assessment`, `eviction_age_min_shard`, `<type>_latency_*`, `<type>_error_rate_pct`, `hash_*`, `<type>_operations_by_op` | Examine evidence for storage pressure before proposing sizing changes; see `references/infrastructure-tuning.md` |
 | Worker resource pressure | `get_worker_fleet_health` | `execution_stage_{p50,p90,p99}`, `rss_p90`, `cpu_{user,system}_p90`, `block_io_{in,out}_p90`, `*_ctx_switches_p90`, `file*_p90`; `scheduler_queue_depth` separates an idle fleet from a stuck one | Tune worker size or concurrency |
 | gRPC errors | `get_grpc_health` | `server_error_rate_pct`, `top_codes`, `{server,client}_latency_*`, `{server,client}_in_flight` | Investigate service/network failures; `top_codes` is inclusive while the error rate excludes successful codes. Latency percentiles exclude the `buildbarn.remoteworker.OperationQueue` long poll, which an idle worker fleet holds open for minutes, unless `serviceFilter` names that service — `data.notes` states which applied |
 | Pod restarts or out-of-memory | `list_buildbarn_events`, `get_buildbarn_pod_logs` | event/log evidence; `data.order` is `newest_first` and `data.hasMore` says whether older matches in the window were left out, so a full page is the newest slice and not the whole window. Records are projected onto diagnostic fields with the dropped names in `omittedFields` — pass `includeAllFields=true` for every ingested field | Raise `limit` or narrow `timeRange` before concluding; adjust limits or fix the failing component |
@@ -780,17 +828,17 @@ remote-action concurrency and not a count of available worker slots or replicas.
 
 ### Cost Optimization
 
-Use `get_remote_action_trends`, `analyze_remote_execution`, and
-`get_cost_summary`. Prioritize:
-
-1. Improve cache hit rate: every hit avoids remote execution.
-2. Move poor remote-fit, I/O-bound actions local when parallelism permits.
-3. Right-size workers using fleet utilization and queue metrics.
-4. Optimize the top `data.expensiveTargets` and `data.slowestActions`.
-5. Use lower-cost capacity where reliability permits.
-
-Only calculate savings when required inputs are present, such as `missCount`,
-average execution time, average action cost, action count, or worker cost.
+Start with `get_cost_summary` when it is listed. If cost tools are absent,
+report cost analysis unavailable without calling unrelated telemetry tools. Quote
+the returned window, snapshot time, coverage, currency, and pricing coverage;
+missing values are unavailable. When the nominal allocation window extends past
+`fetchedAt`, say it was incomplete at the snapshot; the snapshot does not establish
+coverage of earlier intervals. Allocation-bucket efficiency fields are unweighted
+averages over `data.context.allocationScope` (which may be an entire namespace),
+not a pool or fleet-wide utilization ratio or exact idle costs.
+Use performance and infrastructure evidence for specific follow-up questions,
+but calculate savings only when the required costs and comparable evidence are
+available.
 
 ## Playbooks
 
@@ -851,7 +899,10 @@ For a known invocation ID:
    resource, critical-path, or analysis evidence instead. Check
    `data.profile.phases` and `data.profile.hotspots` (such as `repo_fetch`,
    `starlark`, and `package_creation`) when `analysisSeconds` is a large share of
-   wall time, and compare `data.profile.resources.maxLoadAverage` against local
+   wall time. Prefer the named hotspot over generic macro advice: a repository
+   implementation can be nested in Starlark work, so inspect its longest
+   occurrence and compare equivalent warm/cold runs before proposing rule edits.
+   Compare `data.profile.resources.maxLoadAverage` against local
    concurrency (`--jobs`, `--local_test_jobs`, and multi-worker test env vars)
    when local test shards run concurrently. When `get_build_details` shows
    multiple `bazel test //...` invocations sharing one `buildId` with distinct
@@ -885,9 +936,10 @@ For a known invocation ID:
    available, and ready replica series with the invocation-owned queue and
    concurrency timeline. If those series are absent or incomplete, or the tool
    reports scale events unavailable, do not upgrade the hypothesis. When step 6
-   returned `scaleUp` for the affected platform, whatever its verdict, it already
-   gives the pool's lag and how new pods spent it; use this timeline and the
-   events below only to inspect a specific scale-up. When
+   returned `scaleUp` for the affected platform, it summarizes the pool's ready
+   lag and may include pod startup phase medians. Those phases cover different
+   populations and do not partition the lag or prove its cause. Use the timeline
+   and events below to investigate a specific scale-up. When
    `data.scaleEventsStatus` is `available_separately` and
    `list_buildbarn_events` is listed, call it with the same `invocationId` and
    page with `nextOffset` while `hasMore` is true. Correlate events against
@@ -898,20 +950,27 @@ For a known invocation ID:
    low queueing plus low parallelism supports the graph or lack of ready work.
    A late stepwise ramp is consistent with slow autoscaling, but capacity remains
    a hypothesis until time-aligned desired/available/ready replica or scale-event
-   history shows capacity arriving after queue growth.
+   history shows capacity arriving after queue growth; timestamp alignment alone
+   does not establish controller causation.
 9. Compare a fast and slow like-for-like invocation when deciding whether the
    result is a regression rather than the normal cold-build cost.
 10. Rank findings by observed wall-time impact. Keep Action Cache misses,
    scheduler queueing, and slow individual actions separate rather than making
    one explain the entire duration.
+   Account for unassigned elapsed time explicitly: a 6s analysis span in a 13s
+   invocation is not its only remaining cost. Report measured phase spans and
+   their possible overlap; leave startup, setup, or other gaps unresolved when
+   the returned evidence does not attribute them.
 
 ### Cache Hit Rate Improvement
 
 1. Baseline with `get_cache_trends(lookback="7d")`, or use `"30d"` when the
    user asks for a monthly view.
-2. Identify worst mnemonics and targets from `summarize_cache_events` or
-   `group_cache_events(hit="miss")`.
-3. Drill into `find_cache_events(includeMissAnalysis=true)`.
+2. For a selected invocation, call `group_cache_events(hit="miss")`, then
+   `summarize_cache_events` and `get_invocation(includeCommandLine=true)`.
+3. If miss groups exist, drill into `find_cache_events(includeMissAnalysis=true)`.
+   Otherwise stop the detail flow and report that no remote miss events were
+   recorded; this does not prove no lookup occurred or the event pipeline failed.
 4. Group by reason and map to fixes.
 5. Estimate impact and rank by savings divided by effort.
 6. If `CACHE_EVICTED` is significant, call `get_storage_health` and read
@@ -1079,8 +1138,11 @@ uniform duration clamp means a timeout, and you should stop here.
    and each store's status before using computed block geometry; an overall
    `computed` status does not mean every store was computed. Geometry is not a
    complete configuration audit, and empty findings do not establish correctness.
-   Read `get_buildbarn_config` for the discovered files to assess the remaining
-   configuration, including key-location-map sizing. Take the CAS/AC/ISCC/FSAC
+   Read `get_buildbarn_config` for each distinct discovered file to assess the
+   remaining configuration, including key-location-map sizing. Its `component`
+   argument is the bare file key (such as `storage.jsonnet`), not the
+   ConfigMap-qualified discovery identifier; a call can return the file from
+   multiple ConfigMaps. Take the CAS/AC/ISCC/FSAC
    mapping from `data.configurations[].stores`,
    with the `data.configurations[].fields` that established it, rather than from a
    filename substring or the user's requested store label; the `store` argument
@@ -1109,10 +1171,12 @@ uniform duration clamp means a timeout, and you should stop here.
    `aggregation`). `evictionActivity` and `retentionAssessment` remain unknown
    without a discard counter/timestamp; `eviction_age_min_shard` is insertion age, not
    current retention. Read hash-table pressure from
-   the `hash_*` rows, and blob sizes from `cas_blob_size_*`. Use `eviction_age_min_shard`
-   rather than `eviction_age`, and treat a tens-of-megabytes blob-size p50 as a histogram
-   bucket artifact rather than a real median. `references/infrastructure-tuning.md` has the
-   full metric table and both caveats.
+   the `hash_*` rows when their unit and aggregation match the documented
+   `ops_per_second` peak contract, and blob-size histogram bounds from
+   `cas_blob_size_*`. Use `eviction_age_min_shard` rather than `eviction_age`.
+   Quote each blob-size row's `lowerBound` and `upperBound`; a wide bucket leaves
+   the distribution unresolved rather than giving a precise median.
+   `references/infrastructure-tuning.md` has the full metric table and caveats.
 3. For each store whose geometry status is `computed`, quote the returned
    `blockSizeBytes`, `usableCapacityBytes`, and `maximumBlobSizeBytes` with
    `data.geometry.sectorSizeAssumption` instead of recomputing them. For
@@ -1123,18 +1187,32 @@ uniform duration clamp means a timeout, and you should stop here.
    capacity is that block size times the non-spare block count. State the
    sector-size assumption. One block is the largest storable blob. Report an
    `invalid` layout and its reason rather than treating missing values as zero.
-4. Map each issue to a remediation with two standing cautions: geometry changes
-   (block counts or blocks/device size) flush a persistent store on next start, and
-   the key-location map must grow together with the blocks (plus the memory request
-   when the map is in memory). Load `references/infrastructure-tuning.md` for the
-   sizing tables.
+4. Map evidence-supported issues to remediation. Before changing geometry,
+   verify persistence and the consequences for the mounted blocks, key-location
+   map, and state directory. A configured file path or persistence setting alone
+   does not establish that a store survives a restart or reschedule: verify mounts,
+   backing storage and lifecycle for all three, and report unknowns. An in-memory
+   map is process-local; do not infer that its use was intentional, acceptable,
+   or a cache-only design choice without independent evidence. Assess map pressure
+   and memory separately; do not
+   infer resident object counts or a new map size from a pressure peak. Resolve
+   the exact schema path before naming any concrete configuration field, including
+   conditional recommendations; if schema evidence is unavailable, withhold the
+   field recommendation. For block-device write limits the path is
+   `blocksOnBlockDevice.source.writeConcurrencyLimit`; zero is no configured cap
+   on concurrent write system calls, not measured concurrency. An omitted field is
+   zero only in a complete effective configuration. Verify the backing device and
+   aligned write latency, concurrency, thread pressure and capacity before proposing
+   a limit. `maximumMessageSizeBytes` limits unmarshaled Protobuf messages, not a
+   whole ByteStream blob. Load `references/infrastructure-tuning.md` for context.
 5. Where the ConfigSets tools are present in tools/list (git-managed Buildbarn
    config), preview a change with `render_config_file`, review history
    with `diff_config_set_commits`, and present the proposed Jsonnet change for review.
    Mutations such as `save_config_set` require authorization for that specific change.
    When these tools are absent, present the recommended values for the operator.
-6. Report per store: current facts, issues with severity and confidence, and the
-   concrete recommended values.
+6. Report per store: current facts, evidence-supported issues with confidence,
+   and any supported recommendations. When evidence is insufficient, state what
+   remains unproven instead of inventing a value or claiming sizing is adequate.
 
 ## Errors, Availability, and Mutation Safety
 

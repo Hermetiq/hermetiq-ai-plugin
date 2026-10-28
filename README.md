@@ -60,38 +60,45 @@ the plugin details open, choose the installation scope and complete the install:
 /reload-plugins
 ```
 
-Then connect the Hermetiq MCP server once, in your terminal. The plugin ships
-skills only, so this step works the same for Hermetiq Cloud and self-hosted
-deployments, and for both the `claude` CLI and the desktop app's **Code** tab:
-
-```bash
-claude mcp add --transport http --scope user hermetiq https://mcp.cloud-usc1.hermetiq.io
-```
-
-On first use, open `/mcp`, select **hermetiq**, and sign in with your Hermetiq
-account. Hermetiq Cloud uses OAuth 2.0 Dynamic Client Registration through Stytch;
-signing in to [the Cloud dashboard](https://dashboard.hermetiq.io) beforehand can
-simplify login.
-
 Claude Code plugins also work in the desktop app's **Code** tab; use its plugin
 browser as described in the [Claude Code plugin documentation](https://code.claude.com/docs/en/discover-plugins).
 For Desktop **chat**, follow the [manual setup](#install-in-claude-desktop-chat).
 
+The plugin configures the MCP connection automatically. On first use, authenticate
+with your Hermetiq account. Hermetiq Cloud uses OAuth 2.0 Dynamic Client
+Registration through Stytch; signing in to
+[the Cloud dashboard](https://dashboard.hermetiq.io) beforehand can simplify login.
+If authentication fails, open `/mcp`, select the Hermetiq server, and follow the
+sign-in prompts.
+
 ### Self-hosted / on-prem
 
-Use your deployment's MCP URL in the `claude mcp add` command instead of the
-Cloud URL. Your Hermetiq dashboard's setup page shows the exact command:
+The plugin's MCP server points at Hermetiq Cloud (`https://mcp.cloud-usc1.hermetiq.io`).
+For a self-hosted deployment, add your own server in your terminal:
 
 ```bash
 claude mcp add --transport http --scope user hermetiq https://mcp.hermetiq.your-domain.example/
 ```
 
-Copy the **exact** MCP resource URL, including its path and any trailing slash. In
-the Auth0 setup covered by the installation skill, it must match the API
-identifier/audience, `api.mcpResourceUrl`, and protected-resource metadata byte
-for byte. See the [on-prem authentication guidance](plugins/hermetiq/skills/on-prem-gke-install/SKILL.md#5-auth0--oidc-setup).
-See [Claude Code's MCP setup documentation](https://code.claude.com/docs/en/mcp)
+Copy your deployment's **exact** MCP resource URL, including its path and any
+trailing slash. In the Auth0 setup covered by the installation skill, it must
+match the API identifier/audience, `api.mcpResourceUrl`, and protected-resource
+metadata byte for byte. See the [on-prem authentication guidance](plugins/hermetiq/skills/on-prem-gke-install/SKILL.md#5-auth0--oidc-setup).
+
+Then open `/mcp`, sign in to **hermetiq**, and disable **plugin:hermetiq:hermetiq**
+(the Cloud server bundled with the plugin). See [Claude Code's MCP setup documentation](https://code.claude.com/docs/en/mcp)
 for other configuration scopes.
+
+### MCP-only setup
+
+To configure MCP access without the bundled skills, run this in your terminal:
+
+```bash
+claude mcp add --transport http --scope user hermetiq https://mcp.cloud-usc1.hermetiq.io
+```
+
+For self-hosted deployments, substitute the exact URL described above. Authenticate
+through `/mcp` in Claude Code.
 
 ## Install in Claude Desktop chat
 
@@ -215,11 +222,6 @@ shown by `claude plugin list`.
 
 Restart Claude Code, or run `/reload-plugins` inside your open session, to load
 the update. Check the installed version with `claude plugin list`.
-
-Upgrading from 1.3.x: since 1.4.0 the plugin no longer bundles the MCP server
-(its templated URL failed in the desktop app). If `claude mcp list` doesn't show a
-`hermetiq` server, add it with the `claude mcp add` command in
-[Install in Claude Code](#install-in-claude-code).
 
 Third-party marketplaces have automatic updates off by default. To enable them,
 open `/plugin` → **Marketplaces** → **hermetiq** → **Enable auto-update**.

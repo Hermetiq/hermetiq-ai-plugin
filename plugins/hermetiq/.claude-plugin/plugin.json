@@ -10,5 +10,11 @@
   "repository": "https://github.com/Hermetiq/hermetiq-ai-plugin",
   "license": "Apache-2.0",
   "keywords": ["bazel", "buildbarn", "remote-execution", "remote-cache", "build-optimization", "build-intelligence", "build-infrastructure"],
-  "skills": "./skills"
+  "skills": "./skills",
+  "mcpServers": {
+    "hermetiq": {
+      "type": "http",
+      "url": "https://mcp.cloud-usc1.hermetiq.io"
+    }
+  }
 }
