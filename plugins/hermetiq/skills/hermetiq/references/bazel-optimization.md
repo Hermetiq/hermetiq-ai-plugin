@@ -95,8 +95,9 @@ When you see these in Hermetiq data, recommend specific fixes:
    - Fix: Use shared test libraries and keep test dependencies narrow.
 
 5. **Volatile code generation**: Generators that embed timestamps or non-deterministic output.
-   - Signal: High `INPUT_CHANGED` miss rate on actions downstream of a specific generator.
-   - Fix: Make code generation deterministic, strip timestamps, and use stable sort orders.
+   - Signal: `INPUT_CHANGED` identifies a changed input digest, not its cause. Inspect a
+     per-action or file-level diff for evidence that the generator produced volatile outputs.
+   - Fix when confirmed: Make code generation deterministic, strip timestamps, and use stable sort orders.
 
 6. **Over-broad dependencies**: Targets depend on aggregate libraries instead of precise inputs.
    - Signal: Frequent rebuilds of unrelated downstream targets after small source changes.
