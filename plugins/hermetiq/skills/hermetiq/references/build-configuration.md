@@ -1,7 +1,8 @@
 # Build Configuration Management
 
-Since you cannot read users' `.bazelrc` files or BUILD files directly, infer build
-configuration from Hermetiq telemetry and recommend improvements.
+When the client has access, inspect the user's `.bazelrc` and BUILD files alongside
+Hermetiq telemetry. Otherwise infer configuration from the available telemetry and
+identify the limits of that evidence.
 
 ## Detecting Configuration from Invocation Data
 
@@ -74,7 +75,7 @@ These flags affect remote execution performance. Recommend values based on obser
 
 | Flag | What It Controls | How to Tune from Data |
 |------|-----------------|----------------------|
-| `--jobs=<N>` | Bazel's maximum concurrent actions; it is not remote worker capacity | Use only an explicit numeric value from a complete `get_invocation(includeCommandLine=true)` result, applying last-wins semantics. Compare it only with `get_build_parallelism`'s executing remote-action concurrency. The scheduler executing gauge, unique participating workers, worker slots, and replicas are different quantities and must not be compared with `--jobs`. A peak below `--jobs` is a graph signal only when remote queue wait and scheduler backlog are low. High queueing with low executing parallelism supports worker/scheduler capacity as a hypothesis, and hitting `--jobs` while queueing is high is not a reason to raise it. Treat absent/`auto`/formula/truncated values as an unknown numeric cap. |
+| `--jobs=<N>` | Bazel's maximum concurrent actions; it is not remote worker capacity | Use only an explicit numeric value from a complete `get_invocation(includeCommandLine=true)` result, applying last-wins semantics. Compare it only with `get_build_parallelism`'s executing remote-action concurrency. The scheduler executing gauge, unique participating workers, worker slots, and replicas are different quantities and must not be compared with `--jobs`. A sampled peak below `--jobs` and low queueing can suggest a graph limit, but neither establishes it nor excludes a capacity benefit. High queueing with low executing parallelism supports worker/scheduler capacity as a hypothesis, and hitting `--jobs` while queueing is high is not a reason to raise it. Treat absent/`auto`/formula/truncated values as an unknown numeric cap. |
 | `--remote_timeout=<duration>` (Bazel 5–9) | Maximum wait for remote execution and cache calls, including individual blob transfers; default `60s` | Use remote timing or gRPC evidence to identify the slowest legitimate call and add margin. A `ByteStream.Write` or read can hit this timeout even when no remote action is running. |
 | `--remote_retries=<N>` (Bazel 5–9) | Retry count for transient remote failures; default `5` | Do not add `--remote_retries=5`, which only restates the default. Change it only when `get_grpc_health` shows transient errors; deterministic errors make retries waste time. |
 | `--remote_default_exec_properties` | Default platform properties for remote actions | Check `get_scheduler_health` per-platform breakdown. Ensure properties match worker platforms that have capacity. |
