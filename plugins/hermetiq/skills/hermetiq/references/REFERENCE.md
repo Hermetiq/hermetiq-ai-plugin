@@ -534,6 +534,11 @@ without changing the declared input hash. This causes:
 - **Action Cache**: Maps action keys to result metadata (output digests)
 - **Completeness checking**: Validates Action Cache entries reference blobs that still exist
   in Content Addressable Storage before returning them
+- **Shared namespace**: On Hermetiq Cloud one Buildbarn namespace (`buildbarn`) serves every
+  project configured to use it. Pools are shared rather than per project, and projects are
+  separated by instance name (the project ID), so namespace telemetry includes other
+  projects' load. A worker's instance-name prefix limits which instance names it serves;
+  an empty prefix serves all of them.
 
 ---
 

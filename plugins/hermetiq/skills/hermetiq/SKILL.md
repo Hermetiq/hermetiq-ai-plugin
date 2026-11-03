@@ -369,6 +369,7 @@ context and likewise are not tool calls.
 | Build configuration audit | `list_invocations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`, `find_cache_events` |
 | Storage configuration audit / sizing | `analyze_buildbarn_storage` (or `get_buildbarn_config` only if present) | `get_storage_health`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
 | "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Read serving latencies and blob-size histogram bounds, shared node-wide device rows, and serving error rates with their operation counts. `hash_get_too_many_attempts` and `hash_put_too_many_iterations` indicate key-location-map pressure only with the documented `ops_per_second` peak unit and aggregation; a positive peak neither proves sustained pressure nor gives resident count or a new map size. `eviction_age_min_shard` is historical insertion-age context, not a sizing signal or proof of current retention. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say sizing and the need for a change remain unproven; a healthy assessment does not establish adequate sizing. The `storage_optimization` prompt runs this end to end |
+| "Can we use remote execution?" / "Did we get RBE workers?" | `get_hermetiq_setup` (its `remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service — zero remote actions means not configured, not unavailable |
 | Hermetiq setup | `setup_hermetiq_bazel` prompt | Local `.bazelrc` follow-up only when the client has file access and the user approves edits |
 
 For cache, remote action, and target analysis, start grouped, then drill down:
@@ -414,7 +415,13 @@ mnemonics, phases, or flags.
   uploaded profile. Recommend investigating event/profile delivery, not adding the same flags.
 - Rank by kind before magnitude. A correctness insight such as `disk_cache_with_remote_execution`
   describes a build that can fail later and leads regardless of duration; performance insights
-  follow. `estimatedSavings` is now absent from almost every insight, so ordering by the
+  follow.
+- Never recommend a flag change that one of the invocation's insights warns against; read
+  `get_invocation_insights` before recommending cache or remote-execution flags. In particular,
+  never put `--disk_cache` in a config that also sets `--remote_executor` unless that config
+  also sets `--remote_download_all`: under build-without-the-bytes, outputs served from the disk
+  cache never reach the remote CAS, so a later remote action can fail for want of them. Keep a
+  local disk cache in a separate config used only for local builds. `estimatedSavings` is now absent from almost every insight, so ordering by the
   evidence an insight cites is the normal path — never invent a percentage the tool did not
   return, and never add two together.
 - These field names belong to `get_invocation_insights`. The copy embedded in
@@ -688,6 +695,34 @@ events is a coverage caveat, not proof that no scale event occurred. When
 `list_buildbarn_events` is listed, call it with the same `invocationId` so both
 tools use the same padded window. Correlate event and replica timestamps, but do
 not claim event-to-replica causality from timestamp alignment alone.
+
+### Shared Buildbarn Service
+
+Live infrastructure tools read the managed Buildbarn namespace the project is configured to
+use. On Hermetiq Cloud that namespace (`buildbarn` by default) is one Buildbarn service shared
+by every project configured to use it: the same frontend, scheduler, storage and RbeWorker
+pools.
+
+- Worker pools are shared, not assigned to a project. Any project on the namespace runs actions
+  on a pool by requesting that pool's platform properties. Answer "did we get workers?" with
+  the namespace's pools (`list_rbe_workers` when listed) and how to target them, not with the
+  project's own remote-action counts.
+- Zero remote actions means the project's builds have not enabled remote execution, never that
+  the project has no workers or no executor. On Hermetiq Cloud the shared `pool=sizeclass`
+  workers are reached with `--remote_executor` set to the remote cache endpoint and
+  `--remote_default_exec_properties=pool=sizeclass`; use the `remoteExecution` block of
+  `get_hermetiq_setup` when it returns one, and the dashboard setup page's "Try remote
+  execution" step otherwise. Never tell a Hermetiq Cloud user to ask Hermetiq for an executor endpoint.
+- Projects are separated by instance name: each project's builds use its project ID as
+  `--remote_instance_name`. Invocations, cache events and remote actions are the project's
+  own; the namespace's scheduler, queue, worker, scaling, storage and cost telemetry is the
+  shared service's aggregate and includes other projects' load. Say so when citing it, and
+  never attribute it to the user's builds alone.
+- A pool whose workers register an instance-name prefix serves only instance names under that
+  prefix; a pool with an empty or absent prefix, and any metric without an instance-name label,
+  belongs to the shared service.
+- A `live_evidence_denied` refusal limits what this session can read. It never establishes that
+  the project's builds cannot use remote execution.
 
 ### Buildbarn Infrastructure
 
