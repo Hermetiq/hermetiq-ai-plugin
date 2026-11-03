@@ -234,6 +234,17 @@
       "expectedBehavior": ["uses the exact reviewed payload", "calls the mutation exactly once", "does not retry an ambiguous failure"],
       "evidence": ["cites the returned version and mutation audit"],
       "expectedFinalPatterns": ["version|commit", "[0-9a-f]{40}"]
+    },
+    {
+      "id": "change-impact-no-snapshot",
+      "category": "change_impact",
+      "prompt": "Use the Hermetiq skill. Why did my change retest //bep-nats:all in invocation ${INVOCATION_ID}? This project has not set up change-impact snapshots.",
+      "expectedMcpSequence": ["get_change_impact"],
+      "expectedFirstCall": {"tool": "get_change_impact", "arguments": {"invocationId": "${INVOCATION_ID}"}},
+      "maximumUnnecessaryCalls": 0,
+      "expectedBehavior": ["calls get_change_impact before any other change-impact tool", "stops on no_snapshot or snapshot.available=false instead of calling explain_target_impact or find_impacted_targets", "does not infer the change's impact from the targets the invocation built or tested"],
+      "evidence": ["cites the no_snapshot reason or snapshot.available from get_change_impact", "points to the CI setup or the get_hermetiq_setup changeImpact block"],
+      "expectedFinalPatterns": ["snapshot", "no_snapshot|not available|unavailable|not set up|not configured|set ?up"]
     }
   ]
 }
