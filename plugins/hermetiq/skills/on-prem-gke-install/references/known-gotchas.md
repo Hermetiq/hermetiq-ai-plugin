@@ -164,8 +164,9 @@ container already exited.
 
 ## 5. Shared-cluster naming collisions on cluster-scoped chart objects
 
-Deploying a second, independent namespace's Helm releases (e.g. `hermetiq`
-already exists, now installing into `nick`) onto the **same cluster** can
+Deploying a second, independent namespace's Helm releases (e.g. one
+namespace is already installed, now installing into another) onto the
+**same cluster** can
 collide on cluster-scoped Kubernetes objects (`ClusterRole`,
 `ClusterRoleBinding`) that different charts assume they own exclusively.
 Symptoms are ownership/adoption errors from Helm on install, naming the
@@ -332,7 +333,7 @@ were committed to git either):
   rule) — you'll need to look it up or rotate it in the Auth0 dashboard
   (Applications → your SSO app → Settings → Client Secret) and recreate the
   k8s Secret from that.
-- `nick-wildcard-tls` (or equivalent) — no manual work needed; this is a
+- `<namespace>-wildcard-tls` (or equivalent) — no manual work needed; this is a
   cert-manager `Certificate` resource, not a hand-created secret, and
   reapplying the `Certificate` object regenerates it automatically via the
   existing `ClusterIssuer`.

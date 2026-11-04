@@ -5,9 +5,9 @@ description: >
   cluster using Gateway API. Use when a user wants to test an unreleased
   hermetiq-k8s PR branch, stand up a new test namespace,
   configure Auth0/OIDC (including MCP auth), validate rendered Helm output,
-  run RBE examples, or debug a failed install. Encodes lessons learned from a
-  from-scratch install test in the `nick` namespace on the `test-uss1`
-  cluster — see `references/known-gotchas.md` for the full list.
+  run RBE examples, or debug a failed install. Encodes lessons learned from
+  from-scratch install tests — see `references/known-gotchas.md` for the full
+  list.
 argument-hint: "[namespace name], [PR number(s)], or a specific install step to debug"
 ---
 
@@ -33,10 +33,13 @@ testing, not the `main` branch or an `oci://` release. Use a `git worktree`
 per PR so this doesn't disturb other work on the same clone's `main`:
 
 ```bash
-cd ~/source/hermetiq/hermetiq-k8s
+cd <hermetiq-k8s-clone>
 git fetch origin pull/<PR_NUMBER>/head:pr-<PR_NUMBER>
-git worktree add ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER> pr-<PR_NUMBER>
+git worktree add <pr-worktree> pr-<PR_NUMBER>   # e.g. ../hermetiq-k8s-pr<PR_NUMBER>
 ```
+
+Ask the user where their `hermetiq-k8s` clone lives rather than assuming a
+path; `<pr-worktree>` below means the worktree directory created here.
 
 For a released install, follow the repository README and use the pinned OCI
 charts at `oci://ghcr.io/hermetiq/`. For an unreleased PR, use all three chart
@@ -59,9 +62,9 @@ helm upgrade --install hmq oci://ghcr.io/hermetiq/hermetiq --version <VERSION> .
 
 # Do this instead:
 helm upgrade --install hmq \
-  ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER>/charts/hermetiq \
+  <pr-worktree>/charts/hermetiq \
   --namespace <namespace> \
-  --values ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER>/<environment>-custom-values/hermetiq-values.yaml
+  --values <pr-worktree>/<environment>-custom-values/hermetiq-values.yaml
 ```
 
 ## 2. Prepare the namespace
@@ -123,7 +126,7 @@ live install defeats a from-scratch test and risks carrying over naming
 collisions (see `references/known-gotchas.md`).
 
 ```bash
-cd ~/source/hermetiq/hermetiq-k8s-pr<PR_NUMBER>
+cd <pr-worktree>
 cp -R custom-values <environment>-custom-values
 ```
 
@@ -155,7 +158,7 @@ common during PR testing):
 ```yaml
 images:
   bepNats:
-    repository: us-central1-docker.pkg.dev/hermetiq-cloud/cloud/bep-nats  # private registry — GKE pulls via Workload Identity
+    repository: <registry>/bep-nats  # registry and tags supplied with the pre-release build
     apiTag: "<tag>"
     pubTag: "<tag>"
     subTag: "<tag>"
