@@ -258,7 +258,7 @@ Profile bottleneck glossary:
 |-------------------|------------|----------------------|
 | `process_bound` | Remote worker time is mostly spent running the action process itself. In Bazel terms, the command inside the sandbox, such as compiler, linker, test runner, or codegen tool, is the long pole rather than queueing, input fetch, cache checks, uploads, or output download. | Inspect related actions and mnemonics; split large targets, shard long tests, improve persistent workers, tune compiler/linker/test flags, or use larger workers only when resource signals show CPU or memory saturation. More workers usually will not shorten one serial action. |
 | `analysis_bound` | Client analysis work is prominent in accumulated phase totals; it may overlap execution and does not establish wall-time dominance. | Trim broad target patterns, reduce macro/rule analysis work, simplify dependency fanout, and investigate expensive repository or rule setup. |
-| `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `analyze_remote_execution.data.queueWaitStats` and `get_scheduler_health`; scale or rebalance workers for the affected platform. |
+| `queue_bound` | Remote actions wait for scheduler/worker capacity. | Validate with `analyze_remote_execution.data.queueWaitStats` and `get_scheduler_health`; namespace metrics include all clients. Propose scaling or rebalancing to the authorized operator only when aligned platform, capacity and replica evidence supports a capacity constraint. |
 | `fetch_bound` | Workers spend a large share fetching inputs from Content Addressable Storage. | Reduce declared inputs, improve worker cache locality or virtual filesystem/prefetching, and check storage latency. |
 | `upload_bound` | Workers spend a large share uploading outputs. | Shrink outputs, avoid unnecessary declared outputs, and check storage upload health. |
 | `output_download_bound` | The Bazel client spends too much wall time downloading remote outputs. | Prefer `--remote_download_outputs=toplevel` or `minimal` where compatible and reduce top-level output volume. |
@@ -526,19 +526,22 @@ without changing the declared input hash. This causes:
 - Step 6 (upload): Depends on output size and storage latency. Shows as output_upload_ms.
 
 ### Buildbarn concepts
-- **Instance name**: Scopes the cache namespace (for example, per-project isolation).
-  `hierarchicalInstanceNames: true` allows access to parent scopes.
+- **Instance name**: A routing and cache key scope configured by the deployment. It does not
+  by itself provide authorization or physical storage isolation; verify the deployment's
+  access controls. `hierarchicalInstanceNames: true` permits parent-instance traversal
+  where configured.
 - **Platform properties**: Key-value pairs that match actions to compatible workers
   (operating system family, container image, instruction set architecture, etc.)
 - **Content Addressable Storage**: Stores all blobs (inputs, outputs) by content hash
 - **Action Cache**: Maps action keys to result metadata (output digests)
 - **Completeness checking**: Validates Action Cache entries reference blobs that still exist
   in Content Addressable Storage before returning them
-- **Shared namespace**: On Hermetiq Cloud one Buildbarn namespace (`buildbarn`) serves every
-  project configured to use it. Pools are shared rather than per project, and projects are
-  separated by instance name (the project ID), so namespace telemetry includes other
-  projects' load. A worker's instance-name prefix limits which instance names it serves;
-  an empty prefix serves all of them.
+- **Shared namespace**: Cloud and on-prem infrastructure reads resolve the project's saved
+  Managed Namespace. Its name is arbitrary. Pools and namespace telemetry cover all clients
+  of those resources, even when only one project is registered; project analytics remain
+  separately scoped. A worker's instance-name prefix narrows which instances it serves,
+  without proving project exclusivity; an empty prefix serves all matching instances.
+  Use server-provided deployment and caller authority when proposing operator changes.
 
 ---
 

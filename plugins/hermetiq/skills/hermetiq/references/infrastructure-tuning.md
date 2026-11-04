@@ -5,6 +5,12 @@ configuration, then correlate with metrics from the infrastructure tools to iden
 opportunities. If neither live config tool is present, ask the operator for the relevant
 Jsonnet/ConfigMap content before making config-specific recommendations.
 
+Infrastructure scope comes from the Project's Managed Namespace in both Cloud and on-prem;
+use the exact server-resolved namespace and deployment/operator context. Namespace metrics
+cover all clients using those resources, even with one registered project. Project analytics
+remain separate. Keep this scope explicit in tuning findings, and direct shared-resource
+changes to the installation operator unless server context establishes caller authority.
+
 ---
 
 ## Storage Tuning

@@ -89,7 +89,8 @@ The catalog is deployment-aware:
   available.
 - Check `list_buildbarn_events` and `get_buildbarn_pod_logs` independently; events
   can be available when pod logs are not.
-- `get_cost_summary` is Cloud/OpenCost-only.
+- Use `get_cost_summary` only when listed; cost reporting requires configured OpenCost.
+  Its absence means cost evidence is unavailable, not that the installation must be Cloud.
 - ConfigSet tools and Buildbarn schema tools are independently gated.
 
 Two capability boundaries are hard rules:
@@ -378,7 +379,7 @@ context and likewise are not tool calls.
 | Build configuration audit | `list_invocations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`, `find_cache_events` |
 | Storage configuration audit / sizing | `analyze_buildbarn_storage` (or `get_buildbarn_config` only if present) | `get_storage_health`, the `buildbarn://guides/storage-model` resource, operator-supplied config or ConfigSets tools where enabled |
 | "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Read serving latencies and blob-size histogram bounds, shared node-wide device rows, and serving error rates with their operation counts. `hash_get_too_many_attempts` and `hash_put_too_many_iterations` indicate key-location-map pressure only with the documented `ops_per_second` peak unit and aggregation; a positive peak neither proves sustained pressure nor gives resident count or a new map size. `eviction_age_min_shard` is historical insertion-age context, not a sizing signal or proof of current retention. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say sizing and the need for a change remain unproven; a healthy assessment does not establish adequate sizing. The `storage_optimization` prompt runs this end to end |
-| "Can we use remote execution?" / "Did we get RBE workers?" | `get_hermetiq_setup` (its `remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service — zero remote actions means not configured, not unavailable |
+| "Can we use remote execution?" / "Did we get RBE workers?" | `get_hermetiq_setup` (its `remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service — zero recorded actions proves neither configuration nor worker availability |
 | Hermetiq setup | `setup_hermetiq_bazel` prompt | Local `.bazelrc` follow-up only when the client has file access and the user approves edits |
 | "Why did my change rebuild or retest X?" | `get_change_impact` | `explain_target_impact(target=X)`: root causes nearest first, each `path` left to right, `rootCauseTotal` beside the rows; see `references/change-impact.md` |
 | "Did CI run the tests my change affects?" / selective-testing gap | `get_change_impact`, then read `coverage.invocation` and `coverage.build` | `find_impacted_targets(testsOnly=true, coverage="not_executed")` pages the gap; the `explain_change_impact` prompt runs this end to end; `check_change_coverage`, only when listed, for a durable shared verdict |
@@ -711,29 +712,47 @@ not claim event-to-replica causality from timestamp alignment alone.
 
 ### Shared Buildbarn Service
 
-Live infrastructure tools read the managed Buildbarn namespace the project is configured to
-use. On Hermetiq Cloud that namespace (`buildbarn` by default) is one Buildbarn service shared
-by every project configured to use it: the same frontend, scheduler, storage and RbeWorker
-pools.
+In Cloud and on-prem alike, live infrastructure reads use the project's saved
+**Managed Namespace**, resolved and authorized by the server. Its name is deployment-specific;
+never substitute `buildbarn`, `hermetiq`, or the application's namespace. A Config Editor
+session linked to a ConfigSet uses its authorized namespace link instead.
 
-- Worker pools are shared, not assigned to a project. Any project on the namespace runs actions
-  on a pool by requesting that pool's platform properties. Answer "did we get workers?" with
-  the namespace's pools (`list_rbe_workers` when listed) and how to target them, not with the
-  project's own remote-action counts.
-- Zero remote actions means the project's builds have not enabled remote execution, never that
-  the project has no workers or no executor. On Hermetiq Cloud the shared `pool=sizeclass`
-  workers are reached with `--remote_executor` set to the remote cache endpoint and
-  `--remote_default_exec_properties=pool=sizeclass`; use the `remoteExecution` block of
-  `get_hermetiq_setup` when it returns one, and the dashboard setup page's "Try remote
-  execution" step otherwise. Never tell a Hermetiq Cloud user to ask Hermetiq for an executor endpoint.
-- Projects are separated by instance name: each project's builds use its project ID as
-  `--remote_instance_name`. Invocations, cache events and remote actions are the project's
-  own; the namespace's scheduler, queue, worker, scaling, storage and cost telemetry is the
-  shared service's aggregate and includes other projects' load. Say so when citing it, and
-  never attribute it to the user's builds alone.
-- A pool whose workers register an instance-name prefix serves only instance names under that
-  prefix; a pool with an empty or absent prefix, and any metric without an instance-name label,
-  belongs to the shared service.
+When present, the envelope's `infrastructure` object supplies the actual `namespace`,
+`telemetryScope`, `deploymentMode`, `operator`, and `callerIsOperator`. These are server facts,
+separate from the tool's `data`. Older servers may omit them: keep unknown facts unknown,
+and do not infer Cloud ownership from a namespace, endpoint hostname, or missing tools.
+
+- The namespace's frontend, scheduler, storage and worker pools serve all authorized clients.
+  Even one registered project does not prove exclusive use: clients without project analytics
+  can contribute load. A project count cannot establish this project's share of namespace metrics.
+- Worker pools are shared, not assigned to a project. Establish a project's requested pool from
+  its own remote-action or invocation platform evidence and the pool's live state. Availability
+  requires a compatible platform, instance name, endpoint and authorization; a pool inventory
+  alone does not establish that the project's builds can execute there. Report inventory or
+  counts only from successful tool evidence; missing evidence is unknown.
+- Zero recorded remote actions does not establish whether remote execution is enabled or workers
+  are available. Fully cached or no-op builds can execute no actions, and missing completed
+  action logs can hide actions that ran. Read `get_invocation` with `includeCommandLine=true`
+  and `remoteExecutionEnabled` for configuration, and check `get_project.completedActionLogEnabled`
+  before interpreting absent action records. On Cloud, `pool=sizeclass` is the quickstart default;
+  use `get_hermetiq_setup`'s `remoteExecution` block when available for exact flags. For on-prem,
+  use the actual installation's endpoints, authentication and pool platform properties; do not
+  transplant Cloud flags or assume that remote cache and executor endpoints are identical.
+- Authorized invocation, cache-event and remote-action analytics describe the selected project.
+  Namespace scheduler, queue, worker, scaling, storage and cost telemetry covers every client
+  using those resources; never attribute it to the user's builds alone. Node pod metrics split
+  by namespace do not separate projects within that namespace.
+- Instance names support routing and analytics attribution; they alone do not establish
+  authorization or storage isolation. Use the deployment's configured instance name instead of
+  assuming it is always the project ID. A worker's instance-name prefix narrows the clients it
+  serves but does not prove project exclusivity; an empty prefix serves all matching instances.
+- Hermetiq operates Cloud; the installation operator operates on-prem. Use server-provided
+  caller authority separately from aggregate attribution: project-admin membership alone does
+  not establish installation-operator authority. Operators can review shared-resource changes
+  with validation and rollback; other callers should take those findings to the operator and
+  focus on changes to their own builds. Shared changes affect all clients in either case.
+  In saved or shared reports, describe the authority used to request the report rather than
+  assuming a later reader has the same authority.
 - A `live_evidence_denied` refusal limits what this session can read. It never establishes that
   the project's builds cannot use remote execution.
 
