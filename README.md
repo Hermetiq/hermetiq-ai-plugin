@@ -19,6 +19,7 @@ Claude Desktop chat and Codex can use the same skills through the manual setup b
 - **Improve remote execution** — recommend queue, worker-sizing, and cost improvements from available evidence
 - **Debug infrastructure** — investigate Buildbarn storage, scheduler, and worker fleet health
 - **Audit configuration** — review `.bazelrc` flags, hermeticity, and build graph patterns
+- **Explain change impact** — find the targets and tests a commit range impacts, why, and whether CI ran them
 - **Track trends** — compare builds across time periods, repositories, and branches
 
 ## Prerequisites
@@ -312,6 +313,7 @@ conclusion.
 | "Why did this invocation fail?" | `get_invocation` → `find_actions(result="failed")`; inspect status, aggregates, and successful-retry evidence before fetching needed `get_action_execution` details | `investigate_failure` / [playbook](plugins/hermetiq/skills/hermetiq/SKILL.md#failure-or-test-failure) |
 | "How was Buildbarn health over the last hour?" | `summarize_infrastructure_health(timeRange="1h")`; inspect components whose assessment is not `healthy`, using the same window, and report missing telemetry | `infra_health` / [infrastructure guidance](plugins/hermetiq/skills/hermetiq/SKILL.md#buildbarn-infrastructure) |
 | "Audit Buildbarn storage configuration" | `analyze_buildbarn_storage` without a store filter → `get_buildbarn_config` using the bare configuration filename; identify stores from content, then check available geometry, topology, and runtime health | `analyze_storage_config` / [playbook](plugins/hermetiq/skills/hermetiq/SKILL.md#storage-configuration-audit) |
+| "Why did my change retest X?" / "Did CI run the tests my change affects?" | `get_change_impact`; then `explain_target_impact` for one target, or `find_impacted_targets(testsOnly=true, coverage="not_executed")` for the gap; stop on `no_snapshot` | `explain_change_impact` / [change impact reference](plugins/hermetiq/skills/hermetiq/references/change-impact.md) |
 
 For opaque IDs, branch on the resolver's `kind`: use the invocation flow for
 `invocation` and stop on `not_found`. For `build`, pass its returned ID and
@@ -349,6 +351,7 @@ Build-analysis skill files, relative to [`plugins/hermetiq/skills/hermetiq/`](pl
 | [`references/build-configuration.md`](plugins/hermetiq/skills/hermetiq/references/build-configuration.md) | Configuration drift, hermeticity, stamping, toolchains, and flag audits |
 | [`references/bazel-optimization.md`](plugins/hermetiq/skills/hermetiq/references/bazel-optimization.md) | Bazel flags and build graph patterns |
 | [`references/infrastructure-tuning.md`](plugins/hermetiq/skills/hermetiq/references/infrastructure-tuning.md) | Storage, worker, scheduler, and scaling guidance |
+| [`references/change-impact.md`](plugins/hermetiq/skills/hermetiq/references/change-impact.md) | Change-impact snapshots, tools, coverage verdicts, and CI setup |
 | [`evals/evals.json`](plugins/hermetiq/skills/hermetiq/evals/evals.json) | Behavior cases for tool selection, response contracts, availability, and mutations |
 | [`evals/canonical-mcp-catalog.json`](plugins/hermetiq/skills/hermetiq/evals/canonical-mcp-catalog.json) | Tool snapshot and prompt/resource allowlists |
 
@@ -447,7 +450,8 @@ It expects specific project names, telemetry states, and ConfigSets from
 [`evals.json`](plugins/hermetiq/skills/hermetiq/evals/evals.json), including
 **Local Demo** and **Local Dev**. One case creates a ConfigSet and Git commit in
 the `local-dev` project; use a new test ConfigSet name and request UUID for each
-run. Arbitrary production build IDs are not substitutes for these fixtures.
+run. The change-impact case needs the target graph service enabled on the test
+deployment and an `INVOCATION_ID` with no change-impact snapshot. Arbitrary production build IDs are not substitutes for these fixtures.
 
 Set `HERMETIQ_MCP_EVAL_URL` to that test deployment's reachable endpoint. The runner
 defaults to `http://127.0.0.1:5150/mcp`, but does not start a server or seed its data.
