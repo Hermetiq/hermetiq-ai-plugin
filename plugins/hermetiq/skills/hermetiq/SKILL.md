@@ -7,10 +7,10 @@ description: >
   environment such as GLIBC or shared library loader errors, Buildbarn
   infrastructure health, worker fleet sizing, build cost, flaky or failed tests,
   target/action trends, build configuration drift, profile-derived invocation
-  insights, Bazel JSON profile trends, or
-  comparisons across time periods. Interprets Hermetiq MCP telemetry and
-  proto-backed analytics with Bazel, remote cache, remote execution, and
-  Buildbarn domain knowledge.
+  insights, Bazel JSON profile trends, change impact and selective-testing
+  coverage of a commit range, or comparisons across time periods. Interprets
+  Hermetiq MCP telemetry and proto-backed analytics with Bazel, remote cache,
+  remote execution, and Buildbarn domain knowledge.
 ---
 
 # Hermetiq Bazel Build Optimizer
@@ -35,10 +35,13 @@ Read these only when the user needs the deeper detail:
   anti-patterns.
 - `references/infrastructure-tuning.md`: Buildbarn storage, workers, scheduler, and
   scaling guidance.
+- `references/change-impact.md`: change-impact snapshots, the three read-only
+  change-impact tools, coverage verdicts, Barn Owl delegation, and the CI setup
+  that produces the snapshots.
 
 ## Use the Server Prompts
 
-The server defines 18 workflow prompts, gated by deployment capabilities. Use a matching
+The server defines 19 workflow prompts, gated by deployment capabilities. Use a matching
 prompt when the client exposes MCP prompt retrieval. `prompts/get` renders instructions; it
 does not execute the investigation. Clients without a prompt bridge can follow the workflows
 in this skill directly. Do not claim that prompt retrieval or execution is universally impossible,
@@ -206,6 +209,12 @@ context and likewise are not tool calls.
   A failed test can have no failed action row. Inspect test verdicts and bounded logs;
   an artifact URL alone is not the underlying failure text. Skipped tests and a
   failed target do not by themselves establish a dependency or blast radius.
+- Change-impact tools (`get_change_impact`, `find_impacted_targets`,
+  `explain_target_impact`) and the `explain_change_impact` prompt register only on
+  deployments running the target graph service. Call `get_change_impact` first and
+  stop on `no_snapshot` or `snapshot.available=false`; never infer a change's impact
+  from the targets an invocation built or tested. `references/change-impact.md` has
+  the readings, the intent map, and the CI setup.
 
 ## Project, Build, and Invocation Context
 
@@ -372,6 +381,10 @@ context and likewise are not tool calls.
 | "How do I make the action cache or CAS serve faster?" | `get_storage_health` first, then `analyze_buildbarn_storage` and `get_buildbarn_config` for the file it names | `get_buildbarn_status` for the shard count the metrics are keyed on. Read serving latencies and blob-size histogram bounds, shared node-wide device rows, and serving error rates with their operation counts. `hash_get_too_many_attempts` and `hash_put_too_many_iterations` indicate key-location-map pressure only with the documented `ops_per_second` peak unit and aggregation; a positive peak neither proves sustained pressure nor gives resident count or a new map size. `eviction_age_min_shard` is historical insertion-age context, not a sizing signal or proof of current retention. Name the configuration field each recommendation changes and its current value; when the evidence does not support a change, say sizing and the need for a change remain unproven; a healthy assessment does not establish adequate sizing. The `storage_optimization` prompt runs this end to end |
 | "Can we use remote execution?" / "Did we get RBE workers?" | `get_hermetiq_setup` (its `remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service — zero recorded actions proves neither configuration nor worker availability |
 | Hermetiq setup | `setup_hermetiq_bazel` prompt | Local `.bazelrc` follow-up only when the client has file access and the user approves edits |
+| "Why did my change rebuild or retest X?" | `get_change_impact` | `explain_target_impact(target=X)`: root causes nearest first, each `path` left to right, `rootCauseTotal` beside the rows; see `references/change-impact.md` |
+| "Did CI run the tests my change affects?" / selective-testing gap | `get_change_impact`, then read `coverage.invocation` and `coverage.build` | `find_impacted_targets(testsOnly=true, coverage="not_executed")` pages the gap; the `explain_change_impact` prompt runs this end to end; `check_change_coverage`, only when listed, for a durable shared verdict |
+| "What did this commit range touch?" / nearest impacted targets | `get_change_impact` for the counts and `directChanges` | `find_impacted_targets(impact="direct")`; `maxPackageDistance` or `maxTargetDistance` for the nearest |
+| Change-impact CI setup | `get_hermetiq_setup` and its `changeImpact` block | the CI setup section of `references/change-impact.md` |
 
 For cache, remote action, and target analysis, start grouped, then drill down:
 `group_cache_events` -> `find_cache_events`,
