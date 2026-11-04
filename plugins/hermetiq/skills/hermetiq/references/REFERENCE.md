@@ -8,9 +8,13 @@
   or older permalink. It tells you whether to call build-level or invocation-level tools.
 - `list_invocations` does not return full command-line arguments. To audit flags, first select
   invocations with `list_invocations`, then call
-  `get_invocation(invocationId=..., includeCommandLine=true)` for each.
-- Build history tools accept bounded public filters directly: `lookback`, `repository`,
-  `branch`, `command`, and `status`. The `status` vocabulary is `success` (alias `ok`),
+  `get_invocation(invocationId=..., includeCommandLine=true)` or `compare_build_configurations`.
+- Build history tools (`list_builds`, `summarize_build_history`, `get_build_timeseries`,
+  `summarize_invocation_timeseries`, `get_invocation_timeseries`) accept bounded public filters:
+  `lookback`, `repository`, `branch`, `command`, `status`, and CI metadata filters (`ciProvider`,
+  `ciPipeline`, `ciWorkflow`, `ciJobName`, `ciStepKey`, `ciBuildNumber`, `ciPullRequestNumber`);
+  `list_invocations` additionally accepts `commands`, `statuses`, `pattern`, `users`, `startTime`,
+  and `endTime`. The `status` vocabulary is `success` (alias `ok`),
   `failed` (aliases `error`, `failure`), `remote_error`, `in_progress`, and `interrupted`.
   `remote_error` is a strict subset of `failed` — numeric Bazel exit code 34 — not an alias
   for it, and no value selects an `unknown` invocation. It denotes a general remote-system
@@ -19,6 +23,21 @@
   Aggregated trend tools take the same values in a `statuses` array, and
   `list_filter_values(field="status")` returns this static vocabulary. Do not construct
   protobuf filter or aggregation objects.
+- **Server Prompts Catalog:** The MCP server exposes 19 capability-gated workflow prompts
+  (`prompts/get` renders instructions; it does not execute tool calls):
+  - `invocation_id`: `analyze_invocation`, `debug_cache_misses`, `explain_change_impact`,
+    `investigate_failure`, `test_failures`
+  - Optional `invocation_id` + `lookback`: `diagnose_exec_environment`
+  - Optional `invocation_id` + `time_range`: `infra_health`
+  - `time_range`: `cost_analysis`
+  - `lookback`, `repository`, `command`, `pattern`, `branch`, `user`: `cache_trends`,
+    `compare_periods`, `find_slow_builds`, `project_health`, `rbe_optimization`, `rbe_trends`,
+    `weekly_trends_report` (`profile_trends` also accepts `status`)
+  - `store` + `time_range`: `analyze_storage_config`
+  - `store` + `lookback`: `storage_optimization`
+  - `directory`: `setup_hermetiq_bazel`
+  Project-window prompts take `lookback` (not `time_range`), and no prompt accepts
+  `project_id` or `platform_name`.
 - `get_invocation_insights` is invocation-scoped. It exposes the current typed recommendation
   schema for the same profile-derived action-plan surface that `get_invocation` also surfaces
   under `data.profile.insights`, without loading the full invocation payload.
@@ -130,6 +149,27 @@ Those are pipeline states rather than classifications and are not accepted as a 
 filter; `reason: "unknown"` is rejected outright because the backend reads it as "no filter".
 A cache HIT row carries no `missReason` at all.
 
+Miss reason guidance:
+
+| Reason | Likely cause | First fix |
+|--------|--------------|-----------|
+| `INPUT_CHANGED` | Volatile generated files, timestamps, source/dependency churn | Inspect `find_cache_events(includeMissAnalysis=true)` input/command/env/platform/output-path diffs; match the miss digest and output role (e.g., test execution vs. XML generation) before attributing a costly rerun |
+| `COMMAND_CHANGED` | Flag drift, toolchain changes, stamping | Standardize `.bazelrc`, pin toolchains, avoid stamping non-release builds |
+| `ENV_CHANGED` | Environment variables affect actions | Use strict action environments and explicit `--action_env` |
+| `PLATFORM_CHANGED` | Execution platform properties changed | Standardize platforms and remote execution properties |
+| `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
+| `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
+| `CACHE_EVICTED` | Tracked entry was unavailable; storage size or retention are hypotheses | Corroborate missing blobs and cache reuse intervals; check `get_storage_health` `eviction_age_min_shard` as insertion-age context only, and assess disk capacity and key-location-map pressure separately |
+| `NEVER_CACHED` | No prior tracked hit in the retained lookup window | Read `summarize_cache_events` `data.workloadHistory.priorExposure`: `CACHE_PRIOR_EXPOSURE_COLD` means an expected cold start; otherwise compare against a matched baseline |
+| `INSUFFICIENT_TRACKED_HISTORY` | Tracked lookback did not reach far enough back | Widen the comparison window before treating the miss as new work |
+| `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Unclassified pipeline states | Report the window as unclassified and assign no cause |
+
+Cache hit rate improvement workflow:
+1. Baseline with `get_cache_trends(lookback="7d")` (or `"30d"` for a monthly view).
+2. For one invocation, call `group_cache_events(hit="miss")`. If no miss groups exist, stop the detail flow and report zero recorded miss groups.
+3. When miss groups exist, call `summarize_cache_events`, `get_invocation(includeCommandLine=true)`, and `find_cache_events(includeMissAnalysis=true)`.
+4. Group misses by reason, map to concrete configuration or rule fixes, and rank by observed missed-action count, repeated-action execution duration (`cacheSummary` in `analyze_remote_execution`), or affected target scope divided by effort.
+
 ### RemoteAction
 One record per action executed on a Buildbarn worker. Provides granular phase timing.
 
@@ -216,9 +256,8 @@ schema when only the action plan is needed.
 - `pillar` — `bazel_flags`, `build_graph`, `rules`, `infrastructure`, or `profile_quality`.
 - `title`, `summary`, `recommendation` — user-facing copy.
 - `estimatedSavings.percentOfWallTime`, `estimatedSavings.seconds`,
-  `estimatedSavings.humanReadable` — present on almost no insight now. The rules that priced
-  wall time were withdrawn once their arithmetic was checked, so treat a missing estimate as
-  the normal case and never supply a number the tool did not return.
+  `estimatedSavings.humanReadable` — omitted on most insights; treat a missing estimate as
+  normal and never supply a number the tool did not return.
 - `data.noInsightsReason` — set when `insights` is empty and the emptiness is not a verdict, for
   example a build that has not finished or never captured a profile. An empty list with no
   reason means the profile was analyzed and nothing was flagged; an empty list *with* one is not
@@ -238,18 +277,8 @@ Insight workflow:
 4. Validate the top insights with the smallest underlying tool call: `find_actions`,
    `find_cache_events(includeMissAnalysis=true)`, `analyze_remote_execution`, or
    `get_build_parallelism`.
-5. For a remote-capacity claim, first confirm remote execution and
-   `data.completedActionLogEnabled`. Compare only executing remote-action
-   concurrency with a complete last-wins numeric `--jobs`, or, when `--jobs` is
-   absent or `auto`, with the client's CPU count through `remote_jobs_capped`; the scheduler executing
-   gauge, participating workers, worker slots, and replicas are different quantities.
-   Treat a padded scheduler window as shared corroboration and require time-aligned
-   desired/available/ready replica or scale-event history to prove autoscaler delay.
-   When listed, `get_worker_scaling_timeline` is the canonical historical replica
-   view; absent/incomplete series or unavailable scale events preserve the
-   hypothesis. When `data.scaleEventsStatus` is `available_separately`, use
-   `list_buildbarn_events` with the same invocation window when listed, while
-   treating timestamp alignment as correlation rather than event-to-replica causality.
+5. For remote-capacity claims, follow the canonical **Slow Build or Known Invocation Flow** in
+   `SKILL.md`.
 6. Present finding, impact, recommendation, caveats, effort, priority, and the validating metric.
 
 Profile bottleneck glossary:
@@ -393,7 +422,7 @@ Response fields are under `data` and use proto-JSON camelCase:
 Profile trend workflow:
 1. Call `get_profile_trends(lookback="7d")` unless the user chooses another window.
 2. Report profile coverage and whether rollups were used.
-3. Explain the dominant bottleneck using `top_bottleneckKind`, phase sums, and resource trends.
+3. Explain the dominant bottleneck using `summary.topBottleneckKind`, phase sums, and resource trends.
 4. Drill down only where the profile points: queue -> infrastructure/remote execution, process ->
    actions and critical path, analysis -> Bazel/rule graph, cache-check -> cache/storage.
 5. Pair with `get_critical_path_trends`, `get_remote_action_trends`, `get_cache_trends`, or
@@ -404,6 +433,20 @@ Profile trend workflow:
 - `summarize_project_trends.coreMetrics.cacheHitRate`, `successRate`, and
   `remoteEnabledRate` use percentages (0–100). `buildCountChange` and
   `durationChange` are relative percentage changes, omitted without a valid baseline.
+  `coreMetrics.failed` counts finished invocations with a recorded nonzero exit code
+  (including `interrupted`), excluding `unknown` and `in_progress`, so for scopes without
+  unfinished rows `passed + failed + unknown = totalInvocations` (`totalBuilds` is a
+  compatibility alias). `patternDistribution` counts each requested target pattern per build
+  and can sum past `totalInvocations`.
+- **Weekly or window regression workflow:**
+  1. Quantify period-over-period changes with `summarize_project_trends(lookback="7d")` and
+     `find_slow_invocations(lookback="7d")` (for workload- and action-band-matched median shifts).
+  2. Locate the inflection point with `get_build_timeseries` or `summarize_invocation_timeseries`.
+  3. Check whether cache hit rate (`get_cache_trends`), remote phase/queue time
+     (`get_remote_action_trends`), profile phases (`get_profile_trends`), or target durations
+     (`get_target_trends`) moved.
+  4. Compare a fast baseline invocation before the regression with a slow candidate invocation
+     after it using `compare_build_configurations` and the Slow Invocation Flow.
 - `get_test_trends.cacheHitRate` and `failureRate` use percentages (0–100).
   `failureRateChange` is a percentage-point difference. Use `cacheableRunCount`
   as the cache-hit denominator; absent comparisons are unavailable, not zero.
@@ -775,9 +818,11 @@ Base image to glibc, for judging whether a required symbol version can possibly 
 | Debian 12 bookworm | 2.36 |
 | Debian 13 trixie | 2.41 |
 
-Hermetiq MCP does not currently expose runner container images; they live in worker Deployment pod
-specs, and `get_buildbarn_config` returns component jsonnet only. Treat the runner image as an
-operator-supplied fact and label it as such.
+Use `list_rbe_workers` or `get_rbe_worker` to inspect each pool's `runnerImage` and
+`imagePlatformPinning` (avoid guessing the runner image from the mixed
+`list_worker_pools.images` array, which can include Docker sidecars). Because worker
+tools return current snapshots, confirm whether the image changed when investigating
+an older invocation.
 
 ### Deployment Configuration Values
 
@@ -802,7 +847,7 @@ Hermetiq ships 50+ recording rules for Buildbarn metrics, named
 **Storage rules**:
 - `backend_type_kubernetes_service_operation_storage_type:buildbarn_blobstore_blob_access_operations_started:irate1m` — operation rates by type and backend
 - `backend_type_kubernetes_service_le_operation_storage_type:buildbarn_blobstore_blob_access_operations_duration_seconds_bucket:irate1m` — latency distribution
-- `storage_type:buildbarn_blobstore_hashing_key_location_map_put_too_many_iterations:irate1m` and `...get_too_many_attempts:irate1m` — key-location-map saturation (any sustained nonzero rate = undersized map)
+- `storage_type:buildbarn_blobstore_hashing_key_location_map_put_too_many_iterations:irate1m` and `...get_too_many_attempts:irate1m` — key-location-map probe exhaustion (a positive sampled peak indicates pressure occurred in the window; corroborate with mounted map configuration and time-resolved evidence before resizing)
 - `kubernetes_shard_storage_type:buildbarn_blobstore_old_current_new_location_blob_map_last_removed_old_block_insertion_time_seconds:min` — insertion age of the last discarded block per shard (not its discard timestamp)
 
 **Scheduler rules**:
