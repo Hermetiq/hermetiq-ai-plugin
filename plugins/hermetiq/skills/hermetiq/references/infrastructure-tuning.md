@@ -424,4 +424,4 @@ When builds get slower and the cause is not cache-related or code-related:
 | Worker memory > 80% | With out-of-memory kills | Increase worker memory limits | Eliminates out-of-memory action failures |
 | Storage Get latency increases | Comparable, time-aligned evidence | Investigate serving latency, node I/O and map pressure before choosing a change | Identifies possible bottlenecks |
 | Service mesh error rate > 1% | Any sustained period | Investigate specific error codes | Reduces action failures and retries |
-| Low fleet slot utilization (`activity.slotUtilization`) | Comparable time-resolved workload and capacity evidence | Investigate minimum capacity and demand peaks before changing the fleet | May reveal cost opportunities; do not infer savings without pricing |
+| Low fleet slot utilization (`activity.slotUtilization`) | Comparable time-resolved workload and capacity evidence, and `activity` is not `capacity_limited`, whose named pools ran out of slots | Investigate minimum capacity and demand peaks before changing the fleet | May reveal cost opportunities; do not infer savings without pricing |
