@@ -792,9 +792,15 @@ properties; see `references/infrastructure-tuning.md`.
 `summarize_infrastructure_health` also returns `activity`. `mostly_idle` means executing
 actions averaged under half the worker slots (`slotUtilization`, `executingAverage` over
 `slotsAverage`) or, where slots are unmeasured, that most samples had nothing queued or
-executing (`idleShare`); otherwise it is `active`, or `unmeasured`. Activity never changes a
-verdict: report a mostly idle fleet beside its verdict, not in place of one. A
-mostly idle window does not rule out saturation during a short burst.
+executing (`idleShare`). `capacity_limited` replaces `mostly_idle` when, despite that
+average, a pool ran at its slot ceiling with work queued for it in at least 5 one-minute
+samples of the window, not necessarily consecutive; `capacityLimitedPools` names those pools,
+and `reason` gives each one's executing peak, ceiling, queue depth and saturated minutes.
+Otherwise activity is `active`, or `unmeasured`. Activity never changes a verdict: report a
+mostly idle or capacity-limited fleet beside its verdict, not in place of one. Never read
+`capacity_limited` as spare capacity: the fleet average hides a pool that ran out of slots.
+A `mostly_idle` window does not rule out a pool saturated for under 5 minutes; check
+`platformAssessments[].capacityLimited`.
 
 Judge autoscaling health from `list_worker_pools`, not from Kubernetes Warning events. A
 KEDA-scaled pool carries `scaledObject`, with KEDA's own `Ready`, `Active`, `Fallback`, and
