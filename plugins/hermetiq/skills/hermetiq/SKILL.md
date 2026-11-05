@@ -87,11 +87,11 @@ feature availability:
   `tools/list`, make **no MCP calls** and report that cost and billing analysis
   is unavailable; do not call `health_check` or substitute build duration,
   action cost, or infrastructure utilization.
-- **Slow build given as an opaque ID:** Run the bounded three-call flow —
-  `resolve_build_or_invocation` -> `get_build_details` ->
-  `get_invocation_insights` — and **stop** once they provide duration/status and
-  a recommendation (or `noInsightsReason`). Do not add `get_build`, target,
-  remote-execution, cache, parallelism, or invocation-detail calls.
+- **Slow build given as an opaque ID:** Follow the Slow Build or Known Invocation
+  Flow below, branching on `resolve_build_or_invocation`'s `data.kind`. The bounded
+  three-call flow applies only to `kind="build"`. For `kind="invocation"`, preserve
+  the returned `data.invocationId` and follow the known-invocation steps; never
+  replace it with the parent build's primary/latest attempt.
 - **Change impact:** `get_change_impact`, `find_impacted_targets`,
   `explain_target_impact`, and `explain_change_impact` register only when the
   target graph service is enabled. Always call `get_change_impact` first and
@@ -195,7 +195,7 @@ feature availability:
 | User intent | Start with | Drill down with |
 |---|---|---|
 | What should I fix in this invocation? | `resolve_build_or_invocation` (if opaque), `get_invocation_insights` | Validate `affectedItems` with `find_actions`, `find_remote_actions`, `find_cache_events`, `analyze_remote_execution`, `get_build_parallelism` |
-| Slow build given as an opaque ID | `resolve_build_or_invocation`, `get_build_details` | `get_invocation_insights`; stop after those three calls |
+| Slow build given as an opaque ID | `resolve_build_or_invocation` | Branch on `data.kind`: bounded build flow for `build`, known-invocation flow with the returned `invocationId` for `invocation` |
 | Slow known invocation / late remote capacity | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | Follow the Slow Invocation Flow below |
 | Slow or regressed builds in a window | `find_slow_invocations` (`find_slow_builds` prompt) | Run the Slow Invocation Flow on the highest-`timesMedian` outlier; use `get_cache_trends` for cache regressions |
 | Cache misses in an invocation | `group_cache_events(hit="miss")` | Stop if 0 groups; otherwise `summarize_cache_events`, `get_invocation(includeCommandLine=true)`, `find_cache_events(includeMissAnalysis=true)` |
@@ -217,7 +217,10 @@ feature availability:
 
 ### 1. Slow Build or Known Invocation Flow
 
-- **Opaque build ID:** Call `resolve_build_or_invocation` -> `get_build_details` -> `get_invocation_insights` (using the primary/latest invocation ID), and **stop** when those three calls supply duration/status and a recommendation.
+- **Opaque ID:** Call `resolve_build_or_invocation` and branch on `data.kind`:
+  - `build`: Call `get_build_details` with the resolved `data.buildId`, then `get_invocation_insights` using the primary/latest invocation ID from those details. **Stop** when these three calls supply duration/status and a recommendation (or `noInsightsReason`); do not add `get_build`, target, remote-execution, cache, parallelism, or invocation-detail calls.
+  - `invocation`: Use the resolved `data.invocationId` for the known-invocation steps below. Do not fetch its parent build or substitute another attempt.
+  - `not_found`: Stop and ask for a valid ID or URL.
 - **Window scan for slow builds:** Call `find_slow_invocations` once (do not page and rank builds manually). Cite only invocations listed in `data.slowInvocations` with their `durationSeconds`, group `medianSeconds`, `timesMedian`, `workloadOptions`, and `executedActionsBand`, and cite group regressions only when `medianShiftMeasured=true`. Then run the known-invocation steps below on the highest-`timesMedian` invocation.
 - **Known invocation ID:**
   1. Call `get_invocation(includeCommandLine=true)` and `get_invocation_insights`. Record duration, `status`, cache/execution counts, `data.invocation.remoteExecutionEnabled`, profile bottleneck, and caveats. Resolve the last-wins `--jobs` value from `data.commandLine.command` (not `unstructuredCommand` defaults): use a numeric ceiling only when `commandTruncated` is false. Treat absent or `auto` as `auto` (the client's CPU count, which also caps remote actions and triggers `remote_jobs_capped`), and formula or truncated values as an unknown numeric ceiling.
@@ -254,7 +257,8 @@ feature availability:
 - **Failed actions (`find_actions(result="failed")`):**
   - `find_actions` reads Bazel's failure stream (`result="success"` returns 0 rows on normal builds; use `find_remote_actions` for successful remote executions).
   - Always read `data.aggregations` before paging individual rows.
-  - **Rule out size-class probe timeouts first:** Rows with empty stderr, a single `byStatusCode` of gRPC `4` (`DEADLINE_EXCEEDED`), a clamped `durationStats` min/max, or `supersededBySuccessfulAttempt: true` were timed out on a smaller size class and retried to success at the same digest. Do **not** call `get_action_execution` when that signature is uniform; check `get_invocation` `data.invocation.status` and report that superseded rows are not a build failure.
+  - **Distinguish timeout symptoms from retry success:** Empty stderr together with a single `byStatusCode` of gRPC `4` (`DEADLINE_EXCEEDED`) and clamped `durationStats` min/max supports investigating a configured timeout. These symptoms do not prove a size-class probe or a successful retry; confirm the recorded timeout and retry evidence before assigning that cause.
+  - Only `supersededBySuccessfulAttempt: true` establishes that a failed attempt later succeeded at the same digest. Those superseded rows are not build failures and do not need `get_action_execution` merely to reconfirm success. Do not dismiss rows whose flag is false or absent; investigate unresolved causes with bounded action details. Check `get_invocation` `data.invocation.status` before reporting the build's outcome.
   - When failure signatures are mixed or stderr is needed, pass returned decimal string `id` values to `get_action_execution`. If stderr shows a dynamic loader or interpreter error (`GLIBC_x.y not found`, `cannot open shared object file`, missing ELF/script interpreter), follow the Remote Execution Environment Mismatch playbook in `references/infrastructure-tuning.md`.
 - **Failed or flaky tests (`get_test_results`):**
   - Call `get_test_results(invocationId=..., status="failed", includeLogs=true)`. Read `data.summary` (`failedCount`, `flakyCount`, `timeoutCount`, `passedCount`), which covers all tests in the invocation on every page. If no failed rows exist, stop and report that result; call again with `status="flaky"` or `status="timeout"` only when `data.summary` and the user's question call for them. `logContent` is already decoded, redacted text capped at 4096 bytes (head and tail retained).

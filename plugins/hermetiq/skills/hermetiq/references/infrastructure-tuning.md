@@ -253,9 +253,11 @@ platform property value, update all three places together:
 Use this playbook when remote actions fail with dynamic loader or interpreter
 errors (`version 'GLIBC_x.y' not found`, `cannot open shared object file`,
 `cannot execute binary file`, missing ELF interpreter, or missing
-`/usr/bin/env python3`). **Do not use this playbook when stderr is empty and
-`data.aggregations` shows `DEADLINE_EXCEEDED` with a uniform `durationStats`
-clamp or `supersededBySuccessfulAttempt: true` (that is a size-class timeout).**
+`/usr/bin/env python3`). Empty stderr together with `DEADLINE_EXCEEDED` and a
+uniform `durationStats` clamp supports investigating a timeout, not a loader
+diagnosis. It does not prove a size-class cause or successful retry. Only
+`supersededBySuccessfulAttempt: true` establishes later success at the same
+digest; follow the failure flow in `SKILL.md` when the cause remains unresolved.
 
 1. **Confirm invocation status and failure class:** Call `get_invocation` and
    record `status`, `exitCode`, `exitCodeName`, and `failureMessage`.
