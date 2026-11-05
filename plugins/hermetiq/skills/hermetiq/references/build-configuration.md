@@ -36,13 +36,16 @@ developers using different flags produce different action cache keys, fragmentin
 
 How to detect drift from Hermetiq data:
 
-1. **Cross-user flag comparison**: Use `list_invocations` over one `lookback`, select returned
-   attempts from the users being compared, and inspect each with `get_invocation`. Differences
-   in `--define`, `--copt`, or `--action_env` values cause cache fragmentation.
-2. **CI versus local builds**: Select representative returned attempts by their user/host
-   evidence; these are result fields, not `list_invocations` filters. CI builds often represent
-   the intended configuration.
-3. **Branch-specific configuration**: Use the public `branch` filter to check whether feature branches use
+1. **Cross-user and cross-run flag comparison**: Use `list_invocations` over one `lookback` (filtering
+   by `users`, `branch`, or CI metadata when needed), then call `compare_build_configurations` to
+   compare effective Bazel flags (`commandLine.command` with `.bazelrc` expansions), startup options,
+   and workload comparability between a baseline and candidate invocation, or inspect individual
+   attempts with `get_invocation(includeCommandLine=true)`. Differences in `--define`, `--copt`, or
+   `--action_env` values cause cache fragmentation.
+2. **CI versus local builds**: Use `ciProvider` / `ciJobName` filters or inspect `user` and `host`
+   result fields across `list_invocations` attempts, and compare them with
+   `compare_build_configurations`. CI builds typically represent the intended baseline configuration.
+3. **Branch-specific configuration**: Use the `branch` filter to check whether feature branches use
    different build flags, such as debug versus optimized, that fragment the cache.
 4. **Platform fragmentation**: Check whether different `--platform_suffix` values or remote
    execution properties are in use. Each distinct platform creates a separate cache partition.
@@ -75,7 +78,7 @@ These flags affect remote execution performance. Recommend values based on obser
 
 | Flag | What It Controls | How to Tune from Data |
 |------|-----------------|----------------------|
-| `--jobs=<N>` | Bazel's maximum concurrent actions; it is not remote worker capacity | Use only an explicit numeric value from a complete `get_invocation(includeCommandLine=true)` result, applying last-wins semantics. Compare it only with `get_build_parallelism`'s executing remote-action concurrency. The scheduler executing gauge, unique participating workers, worker slots, and replicas are different quantities and must not be compared with `--jobs`. A sampled peak below `--jobs` and low queueing can suggest a graph limit, but neither establishes it nor excludes a capacity benefit. High queueing with low executing parallelism supports worker/scheduler capacity as a hypothesis, and hitting `--jobs` while queueing is high is not a reason to raise it. Treat absent/`auto`/formula/truncated values as an unknown numeric cap. |
+| `--jobs=<N>` | Bazel's maximum concurrent actions; it is not remote worker capacity | Read from a complete `get_invocation(includeCommandLine=true)` `data.commandLine.command` array using last-wins semantics. Absent or `auto` resolves to the client machine's CPU count, which also caps remote actions; when `get_invocation_insights` reports `remote_jobs_capped`, recommend raising `--jobs` in the remote-execution config. Compare an explicit numeric `--jobs` only with `get_build_parallelism`'s executing remote-action concurrency (never with the scheduler executing gauge, unique participating workers, worker slots, or replicas). Treat formula or truncated values as an unknown numeric cap. |
 | `--remote_timeout=<duration>` (Bazel 5–9) | Maximum wait for remote execution and cache calls, including individual blob transfers; default `60s` | Use remote timing or gRPC evidence to identify the slowest legitimate call and add margin. A `ByteStream.Write` or read can hit this timeout even when no remote action is running. |
 | `--remote_retries=<N>` (Bazel 5–9) | Retry count for transient remote failures; default `5` | Do not add `--remote_retries=5`, which only restates the default. Change it only when `get_grpc_health` shows transient errors; deterministic errors make retries waste time. |
 | `--remote_default_exec_properties` | Default platform properties for remote actions | Check `get_scheduler_health` per-platform breakdown. Ensure properties match worker platforms that have capacity. |
@@ -144,5 +147,5 @@ When auditing a project's configuration, systematically verify:
 - [ ] External repositories are pinned to exact versions
 - [ ] `--remote_download_minimal` is enabled to reduce network transfer
 - [ ] Cache compression uses `--experimental_remote_cache_compression` for Bazel 5–6 or `--remote_cache_compression` for Bazel 7–9 when transfer evidence and server support justify it
-- [ ] `--jobs` is set appropriately for the observed worker fleet capacity
+- [ ] `--jobs` is configured explicitly in remote-execution configs so `auto` (the client's CPU count) does not cap remote action concurrency
 - [ ] Platform properties are consistent across the team
