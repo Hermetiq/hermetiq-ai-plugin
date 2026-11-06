@@ -8,22 +8,30 @@ README, chart references, starter values, examples, and runbooks as the
 canonical instructions; notes below that describe an older documentation gap
 are retained because the failure mode still helps diagnose older releases.
 
-## 1. MCP URL must be byte-for-byte identical everywhere (including trailing slash)
+## 1. MCP URL must use the `/mcp` path (`https://mcp.<namespace>.<your-domain>/mcp`) and leave `api.mcpResourceUrl` unset
 
 MCP + Auth0 resource-server validation compares URLs as literal strings, not
-normalized URIs. The MCP resource URL must match **exactly**, trailing slash
-included, across:
+normalized URIs. Earlier bare-origin configurations (`https://mcp.<domain>/`)
+were retired because MCP clients normalize trailing slashes on a bare origin
+inconsistently, causing Auth0 `Service not found` errors. Use
+**`https://mcp.<namespace>.<your-domain>/mcp`** (with `/mcp`, no trailing slash)
+everywhere:
 
-1. Claude Desktop (or other MCP client) — its configured server URL
-2. Auth0's API identifier/audience for the MCP resource server
-3. The chart's `api.mcpResourceUrl` value
-4. The server's own rendered protected-resource metadata (derived from #3)
+1. **Leave `api.mcpResourceUrl` unset** in `hermetiq-values.yaml` (the chart
+   derives the origin `https://mcp.<global.domain>` and appends `/mcp`
+   automatically; setting a path or trailing slash on `api.mcpResourceUrl` is
+   rejected or breaks RFC 9728 metadata).
+2. Auth0's API `identifier` and default `client-grant` `audience`:
+   `https://mcp.<namespace>.<your-domain>/mcp`
+3. Claude / MCP client configured server URL:
+   `https://mcp.<namespace>.<your-domain>/mcp`
+4. Verify the server's rendered RFC 9728 protected-resource metadata at:
+   `curl -fsS https://mcp.<namespace>.<your-domain>/.well-known/oauth-protected-resource/mcp | jq .resource`
+   (must return `"https://mcp.<namespace>.<your-domain>/mcp"`).
 
-Get any one of these wrong (especially the trailing slash) and the failure
-shows up as a generic client-side "not authorized," not a clear
-scheme/host/path mismatch error. If MCP auth fails and the token itself looks
-fine (right audience, not expired, valid signature), check this first before
-assuming a deeper auth bug.
+Get any one of these wrong and the failure shows up as a generic client-side
+"not authorized" or Auth0 `Service not found`, not a clear path mismatch error.
+See `docs/mcp-auth0-runbook.md` for the full setup.
 
 ## 2. Separate interactive-login and machine clients; configure MCP DCR
 
@@ -248,7 +256,7 @@ against the original example.
 
 ## 11. `RbeWorker` custom resources aren't part of the `buildbarn` Helm release
 
-Worker pools (`kubectl apply -f custom-values/rbeworkers/worker-*.yaml`) are
+Worker pools (`kubectl apply -n <namespace> --kustomize <rbeworkers-dir>`) are
 applied separately from `helm install buildbarn`, the same way a DragonflyDB
 CR instance is applied separately from the Hermetiq chart. Two consequences:
 
@@ -413,3 +421,25 @@ registered API — this works fine (Auth0 doesn't care that one audience
 covers two purposes), it's just less independently revocable long-term. Not
 a blocker; a legitimate interim state, not something requiring an Auth0
 Action to "fix."
+
+## 16. Buildbarn starter traps: `fsac`/`iscc` PVC immutability, scale-from-zero queues, `ClientTrafficPolicy` collision, and 10 TiB KLM sizing
+
+Four cross-cutting issues will trip up a fresh Buildbarn + Hermetiq install if not set before the first `helm install`:
+
+1. **Enable `iscc` and `fsac` before first PVC install**: All starter `RbeWorker` manifests in `custom-values/rbeworkers/` enable `spec.config.generated.prefetching` (which requires `storage.persistence.fsac.enabled: true` so `common.libsonnet` exports `fileSystemAccessCache`). On `mode: pvc`, enabling `fsac` or `iscc` *after* the initial `helm install` mutates StatefulSet `volumeClaimTemplates`, which Kubernetes rejects until you manually delete the `storage` StatefulSet (`kubectl delete sts storage -n <namespace> --cascade=orphan`).
+2. **Predeclare zero-scaled worker queues (`scheduler.predeclaredPlatformQueues`)**: Starter workers such as `worker-ubuntu22-04`, `worker-codex`, and `worker-envoy` start at `replicas: 0` / `minReplicas: 0`. Every zero-scaled pool's exact platform properties (sorted by `name` then `value`) must be listed in `scheduler.predeclaredPlatformQueues`, or builds immediately fail with `No workers exist` instead of queuing work for KEDA to scale up.
+3. **Single `ClientTrafficPolicy` per Gateway**: When `hermetiq` and `buildbarn` share `hermetiq-gateway`, enable `gateway.clientTrafficPolicy.enabled: true` in `hermetiq-values.yaml` **only** and keep `gateway.clientTrafficPolicy.enabled: false` in `buildbarn-values.yaml` (Envoy Gateway marks a second policy targeting the same Gateway listener `Overridden=True`).
+4. **Key-location map (KLM) validation and 10 TiB (5–10 shard) scaling**: Always set `storage.keyLocationMapSizing.validate: true`. For large 10 TiB caches (`10 × 1 TiB` or `5 × 2 TiB` shards), use disk-backed KLM (`backend: blockDevice` with `keyLocationMap: file` on a companion `-meta` PVC, or `backend: filesystem`) with `keyLocationMapSizeMi: 7680` (1 TiB shard) or `15360` (2 TiB shard), set `storage.resources.requests.memory` to `16Gi`–`32Gi` so the mmap'd KLM stays in OS page cache, and set `storage.terminationGracePeriodSeconds: 120`–`180` so shutdown dual-syncs are not `SIGKILL`ed at 30s.
+
+## 17. Hermetiq chart traps: 3-node NATS requirement, `publisher.trustedCalCidrs`, `victoriaMetrics.projectLabelEnabled`, `app.adminEmails`, and large-scale partition math
+
+1. **Packaged `nats_streams.json` requires a 3+ node NATS cluster (`"replicas": 3` on `BEP_BUILD_TOOL`)**:
+   `charts/hermetiq/files/config/nats_streams.json` sets `"replicas": 3` on `BEP_BUILD_TOOL`. If NATS is deployed as a single server (`replicas: 1`), `bep-nats-sub` fails to create the stream on startup and **zero build events are ingested**. Keep `config.cluster.enabled: true` and `config.cluster.replicas: 3` in `nats-values.yaml` (or supply a custom `nats.streamConfig.existingConfigMap` with `"replicas": 1` for single-node test setups).
+2. **`publisher.trustedCalCidrs` must be a non-empty comma-separated string when running `RbeWorker`s**:
+   `RbeWorker` pods stream Completed Action Logs (CAL) to `bep-nats-pub:50091` without user JWTs. `publisher.trustedCalCidrs` defaults to `""`, which fails closed and rejects every CAL stream with `UNAUTHENTICATED`. Set it as a comma-separated string (`publisher.trustedCalCidrs: "10.0.0.0/8"` or your cluster's pod CIDR) — passing a YAML list fails `helm template` validation.
+3. **`victoriaMetrics.projectLabelEnabled: true` is required for RBE metrics and Barn Owl**:
+   `charts/hermetiq/values.yaml` defaults `victoriaMetrics.projectLabelEnabled` to `false`. When using the `buildbarn` chart (whose recording rules preserve the `namespace` label), you must set `victoriaMetrics.projectLabelEnabled: true` and `victoriaMetrics.projectLabel: namespace` in `hermetiq-values.yaml`, or the RBE Infrastructure page and Barn Owl report namespace-scoped metrics as unavailable.
+4. **Set `app.adminEmails` before first login**:
+   Without `app.adminEmails` (or an IdP `hermetiq-admin` group claim), the first user who signs into the Dashboard is created as a non-admin and cannot open Project Settings or manage users.
+5. **Align `app.streamPartitionCount == cacheEvents.numShards` and size NATS `memoryStore` + PostgreSQL at scale**:
+   Each `CACHE_EVENTS_<i>` partition reserves `128 MiB` in NATS `memoryStore`. When scaling `app.streamPartitionCount` (and Buildbarn's `frontend.grpcCacheProxy.cacheEvents.numShards`) to `8–16` for high-volume 5–10 shard deployments, raise NATS `memoryStore.maxSize` to `4Gi–8Gi` (container memory `8Gi–16Gi`, `fileStore.pvc.size` `100Gi–250Gi`), offload BEP progress logs (`stdout`/`stderr`) to object storage via `app.rawBepExportBucket` with a `<prefix>/progress/` lifecycle rule, and raise PostgreSQL `max_connections >= 300–500`.
