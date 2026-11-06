@@ -49,8 +49,10 @@ Readings that are expected, not contradictions:
 - An impacted target whose row shows `cached: true` under `queryMode: query`:
   query mode ignores configuration and over-approximates, and the cache hit is
   Bazel confirming the target was unchanged in the configuration that built.
-- `moduleGraphChanged: true` widens the true set beyond the hash-based one;
-  `impactSource` says who computed the set.
+- `moduleGraphChanged: true` can widen the true set beyond the hash-based one.
+  With `impactSource: server`, the listed set is an under-approximation; with
+  `impactSource: ci`, the CI result remains authoritative because its live Bazel
+  can resolve the module-graph change.
 - `targetDistance` and `packageDistance` are dependency hops and package
   boundaries crossed from the nearest direct change, never time.
 - `counts.tests` is 0 when CI uploaded no kinds; the coverage counts then carry
@@ -147,10 +149,11 @@ targets or project history.
 ```
 
 **Upload**, after the build, with the credential helper's token. Run
-`tools/hermetiq-credential-helper.sh get` and read
+`tools/hermetiq-credential-helper get` and read
 `headers["x-hermetiq-m2m-access-token"][0]` from its JSON; send it as the
 `x-hermetiq-m2m-access-token` request header, passed to the HTTP client through
-stdin (`curl -H @-`), never argv. The M2M client needs `write:bep`, which
+stdin (`curl -H @-`), never argv. In CI the helper reads the client ID and
+secret from `HERMETIQ_M2M_CLIENT_ID` and `HERMETIQ_M2M_CLIENT_SECRET`. The M2M client needs `write:bep`, which
 builder and admin clients carry. Paths are relative to the deployment's
 Hermetiq REST API origin; 60-second timeout per request; best effort, never
 failing the job.
@@ -159,11 +162,13 @@ failing the job.
 | --- | --- | --- |
 | `HEAD` | `/api/v1/projects/<project>/target-graph/snapshots/<tree>?config=<fingerprint>` | 200 with `X-Hermetiq-Snapshot-Parts: hashes,dep-edges` (the parts held) when the tree is stored, 404 when not; PUT only the missing parts |
 | `PUT` | `/api/v1/projects/<project>/target-graph/snapshots/<tree>/<part>?config=<fingerprint>` | `part` is `hashes` or `dep-edges`; gzip body with `Content-Type: application/gzip`; 201 created, 200 identical, 409 different content |
-| `POST` | `/api/v1/projects/<project>/invocations/<invocation-id>/target-graph` | JSON `{fromTree, toTree, config, moduleGraphChanged, impacted, selection, kinds}`; 202 queues the compute |
+| `POST` | `/api/v1/projects/<project>/invocations/<invocation-id>/target-graph` | JSON `{fromTree, toTree, config, moduleGraphChanged, impactComputed, impacted, selection, kinds}`; set `impactComputed: true` after a successful comparison, including an empty impacted set; 202 queues the compute |
 | `GET` | `/api/v1/projects/<project>/invocations/<invocation-id>/target-graph` | the computed summary: state, counters, provenance, coverage |
 
 **Project setting.** "Change impact snapshots", in the dashboard's project
 settings under artifact storage. It needs a valid artifact storage
-configuration with a bucket; snapshots live under `<prefix>/target-graph/`, so
-give that path a lifecycle rule of at least 90 days. While it is off, every
-upload route answers 503 and CI records the trees but uploads nothing.
+configuration with a bucket. Apply an age-based lifecycle rule only to
+`<prefix>/target-graph/v1/<project>/impacts/`, aligned with invocation retention.
+Do not expire snapshots by object age: referencing a snapshot renews its database
+retention without changing the object age. While the setting is off, every upload
+route answers 503 and CI records the trees but uploads nothing.
