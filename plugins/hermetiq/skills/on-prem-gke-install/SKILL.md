@@ -67,12 +67,22 @@ helm upgrade --install hmq \
   --values <pr-worktree>/<environment>-custom-values/hermetiq-values.yaml
 ```
 
-## 2. Prepare the namespace
+## 2. Prepare the namespace and check storage prerequisites
 
 ```bash
 kubectl get namespace <namespace>   # confirm it doesn't already exist
 kubectl create namespace <namespace>
+# Required if running FUSE-based RbeWorker pods (all starter workers use FUSE
+# virtualBuildDirectory) or hostPath raw-block storage:
+kubectl label namespace <namespace> pod-security.kubernetes.io/enforce=privileged --overwrite
 kubectl auth can-i '*' '*' --all-namespaces   # must return: yes
+kubectl get storageclass                      # verify premium-rwo / hyperdisk-balanced (or gp3)
+```
+
+If using GKE Local NVMe raw block storage (`--local-nvme-ssd-block` + `custom-values/buildbarn-values-local-ssd-block.yaml`), apply `custom-values/partition-ephemeral-disks-daemonset.yaml` first and confirm storage nodes carry `hermetiq/ephemeral-lvm=ready`:
+
+```bash
+kubectl get nodes -l hermetiq/ephemeral-lvm=ready
 ```
 
 If the user gets `container.roles.create not allowed` or similar when the
@@ -82,10 +92,9 @@ separate Cloud IAM permission (`container.admin` or equivalent) on the GCP
 project. Ask an admin to grant it; `kubectl auth can-i` on its own won't
 surface this.
 
-If the Buildbarn Worker Operator and its CRDs are **already installed**
-cluster-wide (common on a shared test cluster), do not reinstall or upgrade
-them for a new namespace — the operator reconciles `RbeWorker` CRs across
-namespaces already.
+Check how the Buildbarn Worker Operator is installed:
+- If `bb-worker-operator` is already running **cluster-wide** (`rbac.mode=cluster`, e.g. in `bb-worker-operator-system`), do not reinstall or upgrade the operator or CRDs for a new namespace — it reconciles `RbeWorker` CRs across all namespaces.
+- If the cluster uses **namespace-scoped** operators (`rbac.mode=namespace`, the default in `custom-values/bb-worker-operator-values.yaml`), ensure the `RbeWorker` CRD is established and install `bb-worker-operator` into `<namespace>` with `--skip-crds`.
 
 ## 3. Gateway API routing — check what's actually installed
 
@@ -130,10 +139,12 @@ cd <pr-worktree>
 cp -R custom-values <environment>-custom-values
 ```
 
-Minimum values to set explicitly:
+Minimum values to set explicitly in `hermetiq-values.yaml`:
 
 ```yaml
 namespaceOverride: <namespace>
+global:
+  domain: <namespace>.<your-domain>
 hosts:
   domainBase: <namespace>.<your-domain>
 postgres:
@@ -148,8 +159,103 @@ oidc:
 api:
   jwt:
     enabled: true
-  mcpResourceUrl: "https://mcp.<namespace>.<your-domain>/"   # trailing slash required, see gotcha #1
+  # Leave api.mcpResourceUrl UNSET: the chart derives https://mcp.<global.domain>
+  # and appends /mcp automatically to publish https://mcp.<namespace>.<your-domain>/mcp.
+  # Setting a trailing slash or /mcp path here breaks RFC 9728 metadata (see gotcha #1).
+victoriaMetrics:
+  metricsEnabled: true
+  projectLabelEnabled: true    # Required for RBE Infrastructure page & Barn Owl namespace evidence
+  projectLabel: namespace
+  baseUrl: http://vmselect-vmks.<namespace>.svc.cluster.local:8481/select/0/prometheus
+app:
+  streamPartitionCount: 4      # Must match buildbarn frontend.grpcCacheProxy.cacheEvents.numShards (8-16 for large scale)
+  adminEmails:
+    - <your-admin-email>       # Grants Hermetiq admin role on first login to configure Project Settings
+  cacheEventsEnabled: true
+  normalizeRepoUrls: true
+publisher:
+  # Allow RbeWorker pods in the cluster to stream Completed Action Logs (CAL) to bep-nats-pub:50091.
+  # Must be a comma-separated string (not a YAML list); leaving it empty rejects all worker CAL calls:
+  trustedCalCidrs: "10.0.0.0/8"
+gateway:
+  # Enable ClientTrafficPolicy in hermetiq-values.yaml ONLY when sharing hermetiq-gateway
+  # with the buildbarn chart (leave gateway.clientTrafficPolicy.enabled: false in buildbarn-values.yaml).
+  clientTrafficPolicy:
+    enabled: true
 ```
+
+Minimum values to verify in `buildbarn-values.yaml` (see `charts/buildbarn/README.md` and gotcha #16):
+
+```yaml
+hosts:
+  domainBase: <namespace>.<your-domain>
+  otel: otel-collector.<namespace>.svc.cluster.local
+
+storage:
+  keyLocationMapSizing:
+    validate: true             # Fail helm template if any store's KLM < 2x block object capacity
+  persistence:
+    # Decide on iscc and fsac BEFORE first helm install on mode=pvc (volumeClaimTemplates
+    # are immutable, and starter RbeWorker manifests require fsac for FUSE prefetching):
+    iscc:
+      enabled: true
+    fsac:
+      enabled: true
+    # For large-scale 10 TiB caches (5 x 2 TiB or 10 x 1 TiB shards):
+    # - Set storage.replicas: 10 (1 TiB/shard) or 5 (2 TiB/shard) on dedicated non-spot nodes
+    #   with storage.podAntiAffinityPreset: hard and storage.terminationGracePeriodSeconds: 120-180.
+    # - Use file/device-backed KLM (backend: blockDevice with keyLocationMap: file on a 12Gi-20Gi
+    #   -meta PVC, or backend: filesystem) with keyLocationMapSizeMi: 7680 (1 TiB) or 15360 (2 TiB).
+    # - Size storage.resources.requests.memory to 16Gi (1 TiB/shard) or 28Gi-32Gi (2 TiB/shard)
+    #   so the mmap'd KLM stays resident in OS page cache.
+
+frontend:
+  grpcCacheProxy:
+    enabled: true
+    natsUrl: nats://nats.<namespace>.svc:4222
+    cacheEvents:
+      subjectPrefix: cache
+      numShards: 4             # Must match app.streamPartitionCount in hermetiq-values.yaml
+  jwks:
+    enabled: true
+    issuer: https://<your-tenant>.<region>.auth0.com/
+    audience: https://bep.<namespace>.<your-domain>
+    sync:
+      enabled: true
+      url: https://<your-tenant>.<region>.auth0.com/.well-known/jwks.json
+
+scheduler:
+  sizeClassAnalysis:
+    enabled: true
+  # Declare every RbeWorker platform queue that can scale to zero (minReplicas: 0),
+  # or builds targeting those pools fail immediately with "No workers exist":
+  predeclaredPlatformQueues:
+    - platform:
+        - name: container-image
+          value: docker://ghcr.io/catthehacker/ubuntu:act-22.04
+      sizeClasses: [0]
+    - platform:
+        - name: container-image
+          value: docker://ghcr.io/hermetiq/rbe-worker-codex:latest
+        - name: pool
+          value: codex
+      sizeClasses: [0]
+    - platform:
+        - name: OSFamily
+          value: linux
+        - name: container-image
+          value: docker://envoyproxy/envoy-build-ubuntu:b360040f679238d0fa6ebdf0ef7fe5ef9ba2da45@sha256:f29a21fa0fb8befcd3ff8dc1efce5be2fd7fdb2fc49de8cb0ca2ddcd8ff8fb3e
+        - name: pool
+          value: envoy
+      sizeClasses: [0]
+
+gateway:
+  name: hermetiq-gateway
+  clientTrafficPolicy:
+    enabled: false             # Owned by hermetiq-values.yaml on the shared Gateway
+```
+
+Deploy `RbeWorker` pools using a Kustomize overlay (`kubectl apply -n <namespace> --kustomize <environment>-custom-values/rbeworkers`) so `prometheus.serverAddress`, `completedActionLoggerAddress` (`bep-nats-pub:50091`), `nodeSelector`, and `tolerations` are patched consistently across all worker pools.
 
 If the target chart version predates an official release, check whether the
 brief specifies a temporary image override (unreleased `bep-nats` tags are
@@ -192,12 +298,11 @@ credentials' trust boundary. If an operator deliberately accepts that
 expansion, they must still add an explicit client grant for the MCP audience.
 Interactive clients should continue to use the supported DCR flow.
 
-**Critical: MCP URL must be byte-for-byte identical** (including the
-trailing slash) across all of:
-- The Auth0 API identifier/audience
-- `api.mcpResourceUrl` in the Hermetiq values
-- The MCP client's configured server URL (e.g. Claude Desktop's MCP config)
-- The server's own rendered protected-resource metadata
+**Critical: MCP URL must be `https://mcp.<namespace>.<your-domain>/mcp` (with `/mcp`, no trailing slash)** across all of:
+- The Auth0 API identifier (`https://mcp.<namespace>.<your-domain>/mcp`) and default `client-grant` `audience`
+- Leave `api.mcpResourceUrl` **unset** in `hermetiq-values.yaml` (the chart derives the origin from `global.domain` / `hosts.domainBase` and appends `/mcp` automatically)
+- The MCP client's configured server URL (e.g. Claude's MCP connector URL: `https://mcp.<namespace>.<your-domain>/mcp`)
+- The server's rendered protected-resource metadata at `https://mcp.<namespace>.<your-domain>/.well-known/oauth-protected-resource/mcp`
 
 A mismatch fails silently on the client side (looks like a generic
 "not authorized" error), not as a clear server-side validation error. If MCP
@@ -271,7 +376,7 @@ separate HTTP/2 stream cap. See gotcha #3 for diagnosis order and use the
 
 The raw `curl` flow below uses a dedicated M2M application created for smoke
 testing. In Auth0, authorize that application for the MCP API whose identifier
-is exactly `https://mcp.<namespace>.<your-domain>/`. Keep the Bazel BEP/RBE M2M
+is `https://mcp.<namespace>.<your-domain>/mcp`. Keep the Bazel BEP/RBE M2M
 application separate unless the operator deliberately accepts the additional
 MCP trust described in step 5. For a user-interactive check, use Claude,
 Codex, or another supported client through the DCR flow instead of extracting
@@ -283,22 +388,26 @@ APIs → Authorize in the Auth0 dashboard):
 ```bash
 auth0 api post client-grants --data '{
   "client_id":"<mcp-smoke-client-id>",
-  "audience":"https://mcp.<namespace>.<your-domain>/",
+  "audience":"https://mcp.<namespace>.<your-domain>/mcp",
   "scope":[] }'
 ```
 
 ```bash
+# Verify RFC 9728 protected-resource metadata first:
+curl -fsS https://mcp.<namespace>.<your-domain>/.well-known/oauth-protected-resource/mcp \
+  | jq -er '.resource == "https://mcp.<namespace>.<your-domain>/mcp"'
+
 # Unauthenticated should fail:
-curl -s -o /dev/null -w "%{http_code}\n" https://mcp.<namespace>.<your-domain>/
+curl -s -o /dev/null -w "%{http_code}\n" https://mcp.<namespace>.<your-domain>/mcp
 # expect 401
 
 # Authenticated should succeed and return real data. These are credentials for
 # the dedicated MCP smoke M2M app, not the Bazel BEP/RBE client:
-MCP_URL=https://mcp.<namespace>.<your-domain>/
+MCP_URL=https://mcp.<namespace>.<your-domain>/mcp
 MCP_PROTOCOL_VERSION=2025-11-25
 TOKEN=$(curl -s -X POST "https://<tenant>.auth0.com/oauth/token" \
   -H "Content-Type: application/json" \
-  -d '{"client_id":"<mcp-smoke-client-id>","client_secret":"<mcp-smoke-client-secret>","audience":"https://mcp.<namespace>.<your-domain>/","grant_type":"client_credentials"}' \
+  -d '{"client_id":"<mcp-smoke-client-id>","client_secret":"<mcp-smoke-client-secret>","audience":"https://mcp.<namespace>.<your-domain>/mcp","grant_type":"client_credentials"}' \
   | jq -er '.access_token')
 
 mcp_request() {
