@@ -129,6 +129,8 @@ one second; unknown or insufficiently timed mnemonics count as expensive.
 Include patterns keep every matching miss and override excludes. Without an
 include match, excluded targets keep only examples, including for expensive
 mnemonics. Local-only actions without remote timing keep every miss by default.
+Include/exclude patterns match target labels, not mnemonics, and affect only
+miss retention. They cannot explain retained hit rows.
 Eligible cheap misses retain three examples per invocation and mnemonic, split internal/external,
 with a separate excluded-target bucket. Do not infer eligibility from a local
 action duration or mnemonic name.
@@ -139,6 +141,10 @@ hits were kept rather than complete capture, and `captureNote` explains omitted
 evidence. Mixed capture can retain only some hits. Unfiltered `group_cache_events`
 uses rollups; per-event duration, reason, output or event-time filters restrict
 it to retained rows, so its filtered population can have zero hits by design.
+Partial hit rows do not identify whether a full-capture header, project window
+or target pattern caused retention, or whether capture covered the whole
+invocation. Inspect request/settings evidence before asserting any mechanism
+was enabled or disabled.
 
 Key fields:
 - `hit` — Boolean; the most important field

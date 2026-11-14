@@ -201,7 +201,9 @@ feature availability:
   list is expected under selective capture, not a broken pipeline.
   Sampling eligibility uses remote execution timing: a mnemonic needs at least
   five timed runs over 24 hours with p90 below one second to count as cheap.
-  Include patterns keep every matching miss and take precedence over excludes.
+  Include/exclude patterns match target labels, not mnemonics, and affect miss
+  retention only; an include match never enables hit retention. Include patterns
+  keep every matching miss and take precedence over excludes.
   Without an include match, exclude patterns keep only examples even for an
   expensive mnemonic. Otherwise unknown mnemonics and those with fewer timed
   runs count as expensive and keep all misses. Local-only actions without that
@@ -209,6 +211,10 @@ feature availability:
   their name or local duration. Eligible cheap misses
   keep three examples per invocation and mnemonic, separately for internal/external
   targets; exclude patterns have their own example bucket.
+  Partial hit retention does not identify which full-capture header, project
+  window or target pattern applied, or whether one covered the whole invocation.
+  Do not infer that full capture was enabled or disabled from the row counts
+  alone; inspect request/settings evidence before naming the mechanism.
   Ten counted misses with three retained rows can therefore have seven
   `NOT_RECORDED` misses; do not assign those seven the sampled rows' causes.
   Duration, reason, output and event-time filters can restrict groups to retained
