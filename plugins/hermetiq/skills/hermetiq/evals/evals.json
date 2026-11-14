@@ -245,6 +245,71 @@
       "expectedBehavior": ["calls get_change_impact before any other change-impact tool", "stops on no_snapshot or snapshot.available=false instead of calling explain_target_impact or find_impacted_targets", "does not infer the change's impact from the targets the invocation built or tested"],
       "evidence": ["cites the no_snapshot reason or snapshot.available from get_change_impact", "points to the CI setup or the get_hermetiq_setup changeImpact block"],
       "expectedFinalPatterns": ["snapshot", "no_snapshot|not available|unavailable|not set up|not configured|set ?up"]
+    },
+    {
+      "id": "cache-capture-all-hits-no-rows",
+      "category": "cache_capture",
+      "prompt": "Interpret only these supplied Hermetiq observations using the skill; make no MCP calls. summarize_cache_events: {\"aggregations\":{\"totalActions\":\"100\",\"hitCount\":\"100\",\"missCount\":\"0\",\"hitRate\":1}}. find_cache_events(hit=\"hit\"): {\"totalCount\":0,\"acEvents\":[],\"hitsRecorded\":false,\"captureNote\":\"100 hits were counted in rollups but not kept as events.\"}. Explain the measured hit rate, whether the empty list proves zero hits or pipeline failure, and whether per-action hit identities are available.",
+      "expectedFinalPatterns": [
+        "100",
+        "(?i)rollup",
+        "(?i)(?:not|no|cannot|doesn.t).*?(?:zero hits|pipeline failure|broken pipeline)|(?:empty|absent).*?(?:not|doesn.t|does not).*?(?:zero|failure)",
+        "(?i)(?:identit|digest|per.action).*?(?:unavailable|not available|cannot|not retained|unknown)|(?:unavailable|not available|cannot|not retained).*?(?:identit|digest|per.action)"
+      ],
+      "expectedBehavior": [
+        "reports 100 hits, zero misses and 100% observed lookup hit rate",
+        "distinguishes retained rows from rollups and does not invent producer provenance"
+      ],
+      "expectedMcpSequence": [],
+      "maximumUnnecessaryCalls": 0,
+      "evidence": [
+        "interpret the supplied counters with their original population and retain evidence limits"
+      ]
+    },
+    {
+      "id": "cache-capture-sampled-misses",
+      "category": "cache_capture",
+      "prompt": "Interpret only these supplied Hermetiq observations using the skill; make no MCP calls. summarize_cache_events: {\"aggregations\":{\"totalActions\":\"100\",\"hitCount\":\"90\",\"missCount\":\"10\",\"byMissReason\":[{\"reason\":\"INPUT_CHANGED\",\"count\":\"2\"},{\"reason\":\"UNKNOWN\",\"count\":\"1\"},{\"reason\":\"NOT_RECORDED\",\"count\":\"7\"}]}}. find_cache_events(hit=\"miss\") returned exactly three retained examples of an eligible cheap remote mnemonic (at least five timed remote runs over 24h, p90 below 1s): two INPUT_CHANGED and one UNKNOWN; no file diffs. Explain the 3-example cap, account for all ten misses, and distinguish UNKNOWN from NOT_RECORDED. Does this establish why all misses happened?",
+      "expectedFinalPatterns": [
+        "(?i)three|3",
+        "(?i)seven|7",
+        "NOT_RECORDED",
+        "UNKNOWN",
+        "(?i)(?:not retained|not recorded|no individual|no event|without.*(?:row|event))",
+        "(?i)(?:unclassified|not classified|unknown reason)",
+        "(?i)(?:cannot|does not|doesn.t|not establish|unresolved|unexplained)"
+      ],
+      "expectedBehavior": [
+        "keeps seven omitted misses separate from one retained unclassified miss",
+        "does not extrapolate two input-root labels to all ten misses or identify changed files"
+      ],
+      "expectedMcpSequence": [],
+      "maximumUnnecessaryCalls": 0,
+      "evidence": [
+        "interpret the supplied counters with their original population and retain evidence limits"
+      ]
+    },
+    {
+      "id": "cache-capture-mixed-hits",
+      "category": "cache_capture",
+      "prompt": "Interpret only these supplied Hermetiq observations using the skill; make no MCP calls. The invocation rollup counts 100 hits. find_cache_events(hit=\"hit\") has hitsRecorded=true, totalCount=20, and captureNote=\"80 of 100 hits were not kept individually; rollups count every hit.\" A reason-filtered group request returns zero hits. Explain whether hitsRecorded proves complete capture and whether that filtered group disproves the 100 hits.",
+      "expectedFinalPatterns": [
+        "100",
+        "20",
+        "80",
+        "(?i)(?:not|does not|doesn.t|cannot|no).*?(?:complete|all hits)|(?:complete|all hits).*?(?:not|false)",
+        "(?i)filter",
+        "(?i)rollup"
+      ],
+      "expectedBehavior": [
+        "hitsRecorded means some hits retained, not all",
+        "reason filtering uses the retained row population and does not negate unfiltered counts"
+      ],
+      "expectedMcpSequence": [],
+      "maximumUnnecessaryCalls": 0,
+      "evidence": [
+        "interpret the supplied counters with their original population and retain evidence limits"
+      ]
     }
   ]
 }

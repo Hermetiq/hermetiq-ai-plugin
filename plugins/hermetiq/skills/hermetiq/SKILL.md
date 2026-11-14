@@ -188,7 +188,42 @@ feature availability:
   `UNKNOWN`, `NOT_ENRICHED`, and `ENRICHMENT_UNAVAILABLE` — these are
   unclassified pipeline states, not causes, and are rejected as `reason` filters
   (`reason: "unknown"` is always rejected; omit `reason` instead). Cache HIT
-  rows carry no `missReason`.
+  rows carry no `missReason`. `NOT_RECORDED` is different: the miss was counted
+  in a rollup but no individual event was retained, so no per-action cause is
+  available. It is also not a `reason` filter.
+- **Cache capture:** `summarize_cache_events` and unfiltered `group_cache_events`
+  count every observed Action Cache lookup through rollups. `find_cache_events`
+  returns retained evidence only; its `totalCount` is not the lookup count.
+  Hits normally have no event rows. Full capture keeps hits through the
+  `x-hermetiq-cache-capture: full` header or a project capture window and matching
+  pattern. Read `hitsRecorded` and `captureNote`: true means at least some hits
+  were kept, not that all hits were kept. A positive hit count with an empty hit
+  list is expected under selective capture, not a broken pipeline.
+  Sampling eligibility uses remote execution timing: a mnemonic needs at least
+  five timed runs over 24 hours with p90 below one second to count as cheap.
+  Include patterns keep every matching miss and take precedence over excludes.
+  Without an include match, exclude patterns keep only examples even for an
+  expensive mnemonic. Otherwise unknown mnemonics and those with fewer timed
+  runs count as expensive and keep all misses. Local-only actions without that
+  remote timing remain fully retained by default; do not infer cheapness from
+  their name or local duration. Eligible cheap misses
+  keep three examples per invocation and mnemonic, separately for internal/external
+  targets; exclude patterns have their own example bucket.
+  Ten counted misses with three retained rows can therefore have seven
+  `NOT_RECORDED` misses; do not assign those seven the sampled rows' causes.
+  Duration, reason, output and event-time filters can restrict groups to retained
+  rows; zero hits in that filtered population does not negate unfiltered hits.
+  Lookup byte counts sum requested Action digest sizes, not CAS/network traffic.
+- **Cache conclusions:** An improved AC lookup rate does not establish overall
+  cache health; CAS rate is unavailable unless separately measured, and
+  `CACHE_EVICTED` labels do not prove storage pressure. Keep sample size,
+  unresolved misses and missing telemetry in the verdict and recommendations.
+  `INPUT_CHANGED` proves a different input root, not a changed source file,
+  commit attribution, a legitimate rerun or absence of configuration faults.
+  A small miss count can still be expensive; match execution cost to the missed
+  actions before prioritizing or dismissing cache work. Reconcile comparison
+  direction and any corrections into the final verdict rather than leaving
+  incompatible findings in the answer.
 
 ## Intent to Tool Map
 

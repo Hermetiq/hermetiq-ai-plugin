@@ -118,12 +118,33 @@ Key invocation-level tools:
   tail, because Bazel reports the failure at the end of the stream.
 
 ### CacheEvent
-One record per Action Cache lookup intercepted by Hermetiq's gRPC cache proxy.
+A retained example or diagnostic record for an Action Cache lookup intercepted
+by Hermetiq's gRPC cache proxy. Rollups count every observed lookup; event rows
+are selective evidence, not a complete lookup log. Hits are normally counted
+without retaining rows. They are retained for the full-capture header or a
+project full-capture window and matching pattern. Expensive misses and included
+targets retain diagnostic rows. A mnemonic is eligible for cheap-miss sampling
+only with at least five timed remote executions over 24 hours and a p90 below
+one second; unknown or insufficiently timed mnemonics count as expensive.
+Include patterns keep every matching miss and override excludes. Without an
+include match, excluded targets keep only examples, including for expensive
+mnemonics. Local-only actions without remote timing keep every miss by default.
+Eligible cheap misses retain three examples per invocation and mnemonic, split internal/external,
+with a separate excluded-target bucket. Do not infer eligibility from a local
+action duration or mnemonic name.
+
+Use `summarize_cache_events` for complete invocation counts. In
+`find_cache_events`, `totalCount` counts retained rows, `hitsRecorded` means any
+hits were kept rather than complete capture, and `captureNote` explains omitted
+evidence. Mixed capture can retain only some hits. Unfiltered `group_cache_events`
+uses rollups; per-event duration, reason, output or event-time filters restrict
+it to retained rows, so its filtered population can have zero hits by design.
 
 Key fields:
 - `hit` — Boolean; the most important field
 - `actionMnemonic` — Action type (CppCompile, Javac, etc.)
-- `digestHash` / `digestSize` — Content-addressed action identifier
+- `digestHash` / `digestSize` — Content-addressed Action identifier and declared
+  serialized Action size; summed lookup sizes are not transferred CAS bytes
 - `durationMicros` — Cache lookup latency
 - `CacheMissAnalysis.reason` — Why the lookup missed when `includeMissAnalysis=true`:
   - `NEVER_CACHED` — No prior tracked hit for this action in the retained lookup window; an
@@ -145,7 +166,10 @@ Key fields:
 `summarize_cache_events.data.aggregations.byMissReason` can additionally report `UNKNOWN`
 (enrichment ran and could not classify), `NOT_ENRICHED` (still queued for CAS enrichment),
 and `ENRICHMENT_UNAVAILABLE` (enrichment gave up because the CAS metadata never arrived).
-Those are pipeline states rather than classifications and are not accepted as a `reason`
+`NOT_RECORDED` counts misses held only in rollups, without an individual event
+to classify. It differs from retained-but-unclassified `UNKNOWN`. These buckets
+make the reason counts sum to all misses; they do not establish a miss cause.
+Those are pipeline/capture states rather than classifications and are not accepted as a `reason`
 filter; `reason: "unknown"` is rejected outright because the backend reads it as "no filter".
 A cache HIT row carries no `missReason` at all.
 
@@ -163,6 +187,23 @@ Miss reason guidance:
 | `NEVER_CACHED` | No prior tracked hit in the retained lookup window | Read `summarize_cache_events` `data.workloadHistory.priorExposure`: `CACHE_PRIOR_EXPOSURE_COLD` means an expected cold start; otherwise compare against a matched baseline |
 | `INSUFFICIENT_TRACKED_HISTORY` | Tracked lookback did not reach far enough back | Widen the comparison window before treating the miss as new work |
 | `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Unclassified pipeline states | Report the window as unclassified and assign no cause |
+| `NOT_RECORDED` | Counted miss without a retained event | Report the count; do not extrapolate a retained example's cause to it |
+
+Capture examples: 100 rollup hits and zero hit rows still means 100 observed
+hits. Ten misses with three rows and seven `NOT_RECORDED` misses supports causes
+only for the inspected rows. `hitsRecorded=true` with 20 of 100 hits retained
+does not make the other 80 hit identities or producer provenance available.
+Fingerprints retain classification history for 90 days after the last hit;
+the absence of an event row does not erase the counted lookup.
+
+Keep AC lookup rate, overall cache health and execution cost separate. An
+INPUT_CHANGED label establishes an input-root difference, not why it changed,
+whether a rerun was legitimate or whether uninspected misses share that cause.
+Residual CACHE_EVICTED-labelled misses mean they have not stopped; capacity,
+retention or purge attribution requires storage evidence. A few costly misses
+can matter despite a high hit rate. Use completed candidate-tool evidence in
+the answer, preserve scope/freshness limits, and replace contradicted comparison
+findings instead of appending a correction below an unchanged verdict.
 
 Cache hit rate improvement workflow:
 1. Baseline with `get_cache_trends(lookback="7d")` (or `"30d"` for a monthly view).
