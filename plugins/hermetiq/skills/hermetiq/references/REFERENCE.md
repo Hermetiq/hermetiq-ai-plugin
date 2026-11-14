@@ -147,7 +147,7 @@ Key fields:
   serialized Action size; summed lookup sizes are not transferred CAS bytes
 - `durationMicros` — Cache lookup latency
 - `CacheMissAnalysis.reason` — Why the lookup missed when `includeMissAnalysis=true`:
-  - `NEVER_CACHED` — No prior tracked hit for this action in the retained lookup window; an
+  - `NEVER_CACHED` — No prior tracked hit for this action in the action-fingerprint history; an
     expected cold start only when `summarize_cache_events` `data.workloadHistory.priorExposure`
     is `CACHE_PRIOR_EXPOSURE_COLD`, otherwise unexplained without a baseline
   - `INPUT_CHANGED` — The action's input tree changed (most common)
@@ -184,7 +184,7 @@ Miss reason guidance:
 | `PLATFORM_SUFFIX_CHANGED` | `--platform_suffix` drift | Standardize platform suffix usage |
 | `INSTANCE_MISMATCH` | Different remote cache instance | Align instance names and cache endpoints |
 | `CACHE_EVICTED` | Tracked entry was unavailable; storage size or retention are hypotheses | Corroborate missing blobs and cache reuse intervals; check `get_storage_health` `eviction_age_min_shard` as insertion-age context only, and assess disk capacity and key-location-map pressure separately |
-| `NEVER_CACHED` | No prior tracked hit in the retained lookup window | Read `summarize_cache_events` `data.workloadHistory.priorExposure`: `CACHE_PRIOR_EXPOSURE_COLD` means an expected cold start; otherwise compare against a matched baseline |
+| `NEVER_CACHED` | No prior tracked hit in the action-fingerprint history | Read `summarize_cache_events` `data.workloadHistory.priorExposure`: `CACHE_PRIOR_EXPOSURE_COLD` means an expected cold start; otherwise compare against a matched baseline |
 | `INSUFFICIENT_TRACKED_HISTORY` | Tracked lookback did not reach far enough back | Widen the comparison window before treating the miss as new work |
 | `UNKNOWN` / `NOT_ENRICHED` / `ENRICHMENT_UNAVAILABLE` | Unclassified pipeline states | Report the window as unclassified and assign no cause |
 | `NOT_RECORDED` | Counted miss without a retained event | Report the count; do not extrapolate a retained example's cause to it |
@@ -195,6 +195,8 @@ only for the inspected rows. `hitsRecorded=true` with 20 of 100 hits retained
 does not make the other 80 hit identities or producer provenance available.
 Fingerprints retain classification history for 90 days after the last hit;
 the absence of an event row does not erase the counted lookup.
+The separate `workloadHistory.windowStart` / `windowEnd` bounds describe the
+invocation-history comparison and can be shorter than fingerprint history.
 
 Keep AC lookup rate, overall cache health and execution cost separate. An
 INPUT_CHANGED label establishes an input-root difference, not why it changed,
