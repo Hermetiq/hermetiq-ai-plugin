@@ -135,6 +135,11 @@ Eligible cheap misses retain three examples per invocation and mnemonic, split i
 with a separate excluded-target bucket. Do not infer eligibility from a local
 action duration or mnemonic name.
 
+Send the full-capture header on remote-cache requests using
+`--remote_header=x-hermetiq-cache-capture=full`. It is not BEP upload metadata:
+`--bes_header` does not enable cache capture. This request header is separate
+from the project full-capture window and matching pattern.
+
 Use `summarize_cache_events` for complete invocation counts. In
 `find_cache_events`, `totalCount` counts retained rows, `hitsRecorded` means any
 hits were kept rather than complete capture, and `captureNote` explains omitted
@@ -207,6 +212,9 @@ invocation-history comparison and can be shorter than fingerprint history.
 Keep AC lookup rate, overall cache health and execution cost separate. An
 INPUT_CHANGED label establishes an input-root difference, not why it changed,
 whether a rerun was legitimate or whether uninspected misses share that cause.
+An unchanged serialized Command digest establishes only the same serialized
+Command; toolchain binaries and other input files can change in the input-root
+tree. Require matching input/file evidence before ruling out toolchain changes.
 Residual CACHE_EVICTED-labelled misses mean they have not stopped; capacity,
 retention or purge attribution requires storage evidence. A few costly misses
 can matter despite a high hit rate. Use completed candidate-tool evidence in

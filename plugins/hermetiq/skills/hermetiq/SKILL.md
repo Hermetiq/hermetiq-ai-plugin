@@ -196,7 +196,10 @@ feature availability:
   returns retained evidence only; its `totalCount` is not the lookup count.
   Hits normally have no event rows. Full capture keeps hits through the
   `x-hermetiq-cache-capture: full` header or a project capture window and matching
-  pattern. Read `hitsRecorded` and `captureNote`: true means at least some hits
+  pattern. Send the header on remote-cache requests with Bazel
+  `--remote_header=x-hermetiq-cache-capture=full`; `--bes_header` sends BEP upload
+  metadata and does not enable cache capture. Read `hitsRecorded` and
+  `captureNote`: true means at least some hits
   were kept, not that all hits were kept. A positive hit count with an empty hit
   list is expected under selective capture, not a broken pipeline.
   Sampling eligibility uses remote execution timing: a mnemonic needs at least
@@ -226,6 +229,9 @@ feature availability:
   unresolved misses and missing telemetry in the verdict and recommendations.
   `INPUT_CHANGED` proves a different input root, not a changed source file,
   commit attribution, a legitimate rerun or absence of configuration faults.
+  An unchanged serialized Command digest does not prove toolchain inputs are
+  unchanged: binaries and other input files can change within the input-root
+  tree. Require matching input/file evidence before ruling out toolchain changes.
   A small miss count can still be expensive; match execution cost to the missed
   actions before prioritizing or dismissing cache work. Reconcile comparison
   direction and any corrections into the final verdict rather than leaving
