@@ -96,7 +96,7 @@ feature availability:
   `explain_target_impact`, and `explain_change_impact` register only when the
   target graph service is enabled. Always call `get_change_impact` first and
   **stop** on `no_snapshot` or `snapshot.available=false` without calling the
-  other two tools; never infer change impact from the targets an invocation
+  other change-impact tools; never infer change impact from the targets an invocation
   built or tested. Point to `get_hermetiq_setup` (`changeImpact` block) or
   `references/change-impact.md` for CI setup.
 
@@ -188,7 +188,54 @@ feature availability:
   `UNKNOWN`, `NOT_ENRICHED`, and `ENRICHMENT_UNAVAILABLE` — these are
   unclassified pipeline states, not causes, and are rejected as `reason` filters
   (`reason: "unknown"` is always rejected; omit `reason` instead). Cache HIT
-  rows carry no `missReason`.
+  rows carry no `missReason`. `NOT_RECORDED` is different: the miss was counted
+  in a rollup but no individual event was retained, so no per-action cause is
+  available. It is also not a `reason` filter.
+- **Cache capture:** `summarize_cache_events` and unfiltered `group_cache_events`
+  count every observed Action Cache lookup through rollups. `find_cache_events`
+  returns retained evidence only; its `totalCount` is not the lookup count.
+  Hits normally have no event rows. Full capture keeps hits through the
+  `x-hermetiq-cache-capture: full` header or a project capture window and matching
+  pattern. Send the header on remote-cache requests with Bazel
+  `--remote_header=x-hermetiq-cache-capture=full`; `--bes_header` sends BEP upload
+  metadata and does not enable cache capture. Read `hitsRecorded` and
+  `captureNote`: true means at least some hits
+  were kept, not that all hits were kept. A positive hit count with an empty hit
+  list is expected under selective capture, not a broken pipeline.
+  Sampling eligibility uses remote execution timing: a mnemonic needs at least
+  five timed runs over 24 hours with p90 below one second to count as cheap.
+  Include/exclude patterns match target labels, not mnemonics, and affect miss
+  retention only; an include match never enables hit retention. Include patterns
+  keep every matching miss and take precedence over excludes.
+  Without an include match, exclude patterns keep only examples even for an
+  expensive mnemonic. Otherwise unknown mnemonics and those with fewer timed
+  runs count as expensive and keep all misses. Local-only actions without that
+  remote timing remain fully retained by default; do not infer cheapness from
+  their name or local duration. Eligible cheap misses
+  keep three examples per invocation and mnemonic, separately for internal/external
+  targets; exclude patterns have their own example bucket.
+  Partial hit retention does not identify which full-capture header, project
+  window or target pattern applied, or whether one covered the whole invocation.
+  Do not infer that full capture was enabled or disabled from the row counts
+  alone; inspect request/settings evidence before naming the mechanism.
+  Ten counted misses with three retained rows can therefore have seven
+  `NOT_RECORDED` misses; do not assign those seven the sampled rows' causes.
+  Duration, reason, output and event-time filters can restrict groups to retained
+  rows; zero hits in that filtered population does not negate unfiltered hits.
+  Lookup byte counts sum requested Action digest sizes, not CAS/network traffic.
+- **Cache conclusions:** An improved AC lookup rate does not establish overall
+  cache health; CAS rate is unavailable unless separately measured, and
+  `CACHE_EVICTED` labels do not prove storage pressure. Keep sample size,
+  unresolved misses and missing telemetry in the verdict and recommendations.
+  `INPUT_CHANGED` proves a different input root, not a changed source file,
+  commit attribution, a legitimate rerun or absence of configuration faults.
+  An unchanged serialized Command digest does not prove toolchain inputs are
+  unchanged: binaries and other input files can change within the input-root
+  tree. Require matching input/file evidence before ruling out toolchain changes.
+  A small miss count can still be expensive; match execution cost to the missed
+  actions before prioritizing or dismissing cache work. Reconcile comparison
+  direction and any corrections into the final verdict rather than leaving
+  incompatible findings in the answer.
 
 ## Intent to Tool Map
 
@@ -198,7 +245,7 @@ feature availability:
 | Slow build given as an opaque ID | `resolve_build_or_invocation` | Branch on `data.kind`: bounded build flow for `build`, known-invocation flow with the returned `invocationId` for `invocation` |
 | Slow known invocation / late remote capacity | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | Follow the Slow Invocation Flow below |
 | Slow or regressed builds in a window | `find_slow_invocations` (`find_slow_builds` prompt) | Run the Slow Invocation Flow on the highest-`timesMedian` outlier; use `get_cache_trends` for cache regressions |
-| Cache misses in an invocation | `group_cache_events(hit="miss")` | Stop if 0 groups; otherwise `summarize_cache_events`, `get_invocation(includeCommandLine=true)`, `find_cache_events(includeMissAnalysis=true)` |
+| Cache misses in an invocation | `group_cache_events(hit="miss")` | Call `summarize_cache_events` for total lookups and hit rate even if 0 miss groups; when miss groups exist, also `get_invocation(includeCommandLine=true)`, `find_cache_events(includeMissAnalysis=true)` |
 | Failed build / failing actions | `resolve_build_or_invocation` (if opaque), `find_actions(result="failed")` | Read `data.aggregations` and `supersededBySuccessfulAttempt` first; check `get_invocation` status; call `get_action_execution` only when signatures are mixed or details are missing; `get_build_logs` for stdout/stderr |
 | Remote actions fail with loader/exec errors (`GLIBC_x.y not found`, missing `.so` or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command`, `list_rbe_workers` / `get_rbe_worker`, `list_builds`; follow the Remote Execution Environment Mismatch playbook in `references/infrastructure-tuning.md` |
 | Failed or flaky tests | `get_test_results(status="failed", includeLogs=true)` | Read `data.summary` (`failedCount`, `flakyCount`, `timeoutCount`, `passedCount`); stop if 0 matching rows, or query `status="flaky"` / `"timeout"` when indicated; `get_test_trends`, `get_test_timing` |
@@ -211,7 +258,7 @@ feature availability:
 | Build configuration audit / flag drift | `list_invocations`, `compare_build_configurations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`; see `references/build-configuration.md` |
 | Filter discovery | `list_filter_values` | Supports `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status` (static lowercase vocabulary), `tag` (project-wide key/values), `user`; `status` and `tag` reject `includeCounts=true` |
 | "Can we use remote execution / did we get workers?" | `get_hermetiq_setup` (`remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service below — zero recorded actions proves neither configuration nor worker availability |
-| Change impact / selective-testing coverage | `get_change_impact` first | Stop on `no_snapshot` or `snapshot.available=false`; otherwise `find_impacted_targets`, `explain_target_impact`, or `check_change_coverage` (when listed); see `references/change-impact.md` |
+| Change impact / selective-testing coverage | `get_change_impact` first | Stop on `no_snapshot` or `snapshot.available=false`; otherwise `find_impacted_targets`, `explain_target_impact`, `find_unexplained_cache_misses`, or `check_change_coverage` (when listed); see `references/change-impact.md` |
 
 ## Core Diagnostic Flows
 
