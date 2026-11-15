@@ -206,7 +206,8 @@ Capture examples: 100 rollup hits and zero hit rows still means 100 observed
 hits. Ten misses with three rows and seven `NOT_RECORDED` misses supports causes
 only for the inspected rows. `hitsRecorded=true` with 20 of 100 hits retained
 does not make the other 80 hit identities or producer provenance available.
-Fingerprints retain classification history for 90 days after the last hit;
+Fingerprints retain classification history for a configured period after the
+last hit (30 days by default);
 the absence of an event row does not erase the counted lookup.
 The separate `workloadHistory.windowStart` / `windowEnd` bounds describe the
 invocation-history comparison and can be shorter than fingerprint history.
