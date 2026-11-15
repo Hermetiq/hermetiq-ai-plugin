@@ -4,7 +4,7 @@
 # Change impact
 
 Reference topic for the Hermetiq plugin skill: what a change-impact snapshot
-is, the three read-only tools that read it, the intent map, when to delegate
+is, the four read-only tools that read it, the intent map, when to delegate
 to Barn Owl, and the CI setup that produces the snapshots.
 
 ## What a snapshot is
@@ -32,6 +32,7 @@ server without it, and so is the `explain_change_impact` prompt.
 | `get_change_impact(invocationId)` | every change-impact question, first | `snapshot.available` before anything else; `counts`; `coverage.invocation` and `coverage.build`, each with its own verdict (`covered`, `gap`, `not_assessable`, `no_tests_impacted`) and at most 25 nearest `gapTargets`; `distanceHistogram`; `directChanges` |
 | `find_impacted_targets(invocationId, ...)` | the list behind a count: `testsOnly=true, coverage=not_executed` for the selective-testing gap, `coverage=failed` for failed impacted targets, `impact=direct` for the changes themselves, `maxPackageDistance` or `maxTargetDistance` for the nearest | rows ordered by target distance, package distance, label; `hasMore` and `nextOffset` |
 | `explain_target_impact(invocationId, target)` | one target: the one the user named, or a failed impacted one | `rootCauses` with a `path` from the root cause down to the target; `rootCauseTotal` beside the rows, `truncated`, `searchBounded`; `removed` |
+| `find_unexplained_cache_misses(invocationId)` | cache misses on targets the change did not touch: hermeticity leaks; call it when `get_change_impact` reports `cacheMisses.notImpactedChanged` above 0 | `classCounts`; only individually verified `leak` misses are findings (the previous hit ran at this change's base or head tree with matching snapshot fingerprint and captured build configuration); `unverified` includes unmatched or unchecked baselines; `baselineChecksTruncated` marks unchecked candidates due to the 25-miss budget or concurrent updates; miss totals come from the cache rollups, and misses counted there but not kept as individual events come back as `NOT_RECORDED` groups classed `not_assessable`, with no rows in `find_cache_events`; `complete` remains false without a cache-ingestion barrier, including after the invocation finishes (`cache_ingestion_unknown`) |
 
 When `get_change_impact` fails with `no_snapshot`, or `snapshot.available` is
 false, stop. `pending_snapshots` and `computing` mean the pair is still
@@ -39,7 +40,7 @@ arriving or being compared: say when to retry. `no_snapshot`, `config_mismatch`
 and `failed` are CI setup gaps: give the setup below (on Hermetiq Cloud,
 `get_hermetiq_setup` returns it as the `changeImpact` block). Never infer
 impact from the targets the invocation built or tested, and do not call the
-other two tools for that invocation.
+other change-impact tools for that invocation.
 
 Readings that are expected, not contradictions:
 
@@ -71,6 +72,7 @@ Readings that are expected, not contradictions:
 | "What did this commit range touch?" | `get_change_impact` for the counts and `directChanges`, then `find_impacted_targets(impact=direct)` when more than the first ten are needed |
 | "Which impacted targets are closest to the change?" | `find_impacted_targets(maxPackageDistance=N)` or `maxTargetDistance`; the rows are already ordered by distance |
 | "Which impacted targets failed, and why?" | `find_impacted_targets(coverage=failed)`, then `explain_target_impact` for up to three of them |
+| "Why did unchanged targets miss the cache?" / "Do we have a hermeticity leak?" | `get_change_impact`, then `find_unexplained_cache_misses`; for each `leak` group, `find_cache_events(target=..., hit=miss, includeMissAnalysis=true)` names the part of the action key that moved (environment, command, inputs) |
 | "Set up change impact for my CI" | on Hermetiq Cloud, `get_hermetiq_setup` and its `changeImpact` block; otherwise the setup below |
 
 ## Delegation rule

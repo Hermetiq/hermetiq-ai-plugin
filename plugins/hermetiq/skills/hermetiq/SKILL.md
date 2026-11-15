@@ -96,7 +96,7 @@ feature availability:
   `explain_target_impact`, and `explain_change_impact` register only when the
   target graph service is enabled. Always call `get_change_impact` first and
   **stop** on `no_snapshot` or `snapshot.available=false` without calling the
-  other two tools; never infer change impact from the targets an invocation
+  other change-impact tools; never infer change impact from the targets an invocation
   built or tested. Point to `get_hermetiq_setup` (`changeImpact` block) or
   `references/change-impact.md` for CI setup.
 
@@ -245,7 +245,7 @@ feature availability:
 | Slow build given as an opaque ID | `resolve_build_or_invocation` | Branch on `data.kind`: bounded build flow for `build`, known-invocation flow with the returned `invocationId` for `invocation` |
 | Slow known invocation / late remote capacity | `get_invocation(includeCommandLine=true)`, `get_invocation_insights` | Follow the Slow Invocation Flow below |
 | Slow or regressed builds in a window | `find_slow_invocations` (`find_slow_builds` prompt) | Run the Slow Invocation Flow on the highest-`timesMedian` outlier; use `get_cache_trends` for cache regressions |
-| Cache misses in an invocation | `group_cache_events(hit="miss")` | Stop if 0 groups; otherwise `summarize_cache_events`, `get_invocation(includeCommandLine=true)`, `find_cache_events(includeMissAnalysis=true)` |
+| Cache misses in an invocation | `group_cache_events(hit="miss")` | Call `summarize_cache_events` for total lookups and hit rate even if 0 miss groups; when miss groups exist, also `get_invocation(includeCommandLine=true)`, `find_cache_events(includeMissAnalysis=true)` |
 | Failed build / failing actions | `resolve_build_or_invocation` (if opaque), `find_actions(result="failed")` | Read `data.aggregations` and `supersededBySuccessfulAttempt` first; check `get_invocation` status; call `get_action_execution` only when signatures are mixed or details are missing; `get_build_logs` for stdout/stderr |
 | Remote actions fail with loader/exec errors (`GLIBC_x.y not found`, missing `.so` or interpreter) | `find_remote_actions(result="failed")` | `get_remote_action_command`, `list_rbe_workers` / `get_rbe_worker`, `list_builds`; follow the Remote Execution Environment Mismatch playbook in `references/infrastructure-tuning.md` |
 | Failed or flaky tests | `get_test_results(status="failed", includeLogs=true)` | Read `data.summary` (`failedCount`, `flakyCount`, `timeoutCount`, `passedCount`); stop if 0 matching rows, or query `status="flaky"` / `"timeout"` when indicated; `get_test_trends`, `get_test_timing` |
@@ -258,7 +258,7 @@ feature availability:
 | Build configuration audit / flag drift | `list_invocations`, `compare_build_configurations` | `get_invocation(includeCommandLine=true)`, `get_cache_trends`; see `references/build-configuration.md` |
 | Filter discovery | `list_filter_values` | Supports `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status` (static lowercase vocabulary), `tag` (project-wide key/values), `user`; `status` and `tag` reject `includeCounts=true` |
 | "Can we use remote execution / did we get workers?" | `get_hermetiq_setup` (`remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service below — zero recorded actions proves neither configuration nor worker availability |
-| Change impact / selective-testing coverage | `get_change_impact` first | Stop on `no_snapshot` or `snapshot.available=false`; otherwise `find_impacted_targets`, `explain_target_impact`, or `check_change_coverage` (when listed); see `references/change-impact.md` |
+| Change impact / selective-testing coverage | `get_change_impact` first | Stop on `no_snapshot` or `snapshot.available=false`; otherwise `find_impacted_targets`, `explain_target_impact`, `find_unexplained_cache_misses`, or `check_change_coverage` (when listed); see `references/change-impact.md` |
 
 ## Core Diagnostic Flows
 

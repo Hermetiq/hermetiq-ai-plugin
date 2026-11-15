@@ -138,7 +138,9 @@ action duration or mnemonic name.
 Send the full-capture header on remote-cache requests using
 `--remote_header=x-hermetiq-cache-capture=full`. It is not BEP upload metadata:
 `--bes_header` does not enable cache capture. This request header is separate
-from the project full-capture window and matching pattern.
+from the project full-capture window and matching pattern. The request header
+captures every lookup of that build across all targets; target-scoped full
+capture is configured only through the project full-capture window and pattern.
 
 Use `summarize_cache_events` for complete invocation counts. In
 `find_cache_events`, `totalCount` counts retained rows, `hitsRecorded` means any
@@ -223,7 +225,7 @@ findings instead of appending a correction below an unchanged verdict.
 
 Cache hit rate improvement workflow:
 1. Baseline with `get_cache_trends(lookback="7d")` (or `"30d"` for a monthly view).
-2. For one invocation, call `group_cache_events(hit="miss")`. If no miss groups exist, stop the detail flow and report zero recorded miss groups.
+2. For one invocation, call `group_cache_events(hit="miss")` and `summarize_cache_events` (for overall lookup counts and hit rate even when 0 miss groups exist). If no miss groups exist, stop the per-miss detail flow and report zero recorded miss groups alongside the summary counts.
 3. When miss groups exist, call `summarize_cache_events`, `get_invocation(includeCommandLine=true)`, and `find_cache_events(includeMissAnalysis=true)`.
 4. Group misses by reason, map to concrete configuration or rule fixes, and rank by observed missed-action count, repeated-action execution duration (`cacheSummary` in `analyze_remote_execution`), or affected target scope divided by effort.
 

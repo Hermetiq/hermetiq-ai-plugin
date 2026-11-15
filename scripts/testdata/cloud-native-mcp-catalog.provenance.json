@@ -1,5 +1,5 @@
 {
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "bazel-diff-integ-unmerged",
-  "sha256": "ae2b7be73f971fb0ef1a75894c98c0b8e0edb46b9c8f5a7780442032a34a37ad"
+  "sourceRevision": "07220a4af925a1503aca82c7f7ee7ee85f69e878",
+  "sha256": "3ac95e1b6d1b921300101fabcda4df8fa19f653093dd06af9467c5ee296c349f"
 }
