@@ -140,7 +140,7 @@
       "prompt": "Use the Hermetiq skill. Audit the active Buildbarn storage Jsonnet configuration on this server. Both Kubernetes-backed live-configuration tools are absent, and neither the user nor host named a ConfigSet as the deployed source. Do not choose a saved ConfigSet, use schema metadata, or substitute runtime storage metrics for an active-configuration audit.",
       "expectedMcpSequence": [],
       "maximumUnnecessaryCalls": 0,
-      "expectedBehavior": ["reports the configuration capability as unavailable", "does not call get_storage_health as a substitute", "does not infer a CAS, AC, ISCC, or FSAC store from a filename or requested label without configuration content"],
+      "expectedBehavior": ["reports the configuration capability as unavailable", "does not call get_storage_health as a substitute", "does not infer a CAS, CMS, AC, ISCC, or FSAC store from a filename or requested label without configuration content"],
       "evidence": ["distinguishes absent configuration access from runtime metrics", "states that store selection requires active configuration content"],
       "expectedFinalPatterns": ["unavailable|not available|absent|lack", "configuration"]
     },

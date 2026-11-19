@@ -79,7 +79,7 @@ feature availability:
   configuration access is unavailable. Do not substitute `get_storage_health` or
   schema tools (`get_buildbarn_config_field`, `search_buildbarn_config_schema`,
   `describe_buildbarn_config_type`, `list_buildbarn_config_roots`), and do not
-  infer `CAS`, `AC`, `ISCC`, or `FSAC` stores from filenames or requested labels
+  infer `CAS`, `CMS`, `AC`, `ISCC`, or `FSAC` stores from filenames or requested labels
   without configuration content.
 - **Cost analysis:** Use `get_cost_summary` only when listed; cost reporting
   requires configured OpenCost. Its absence means cost evidence is unavailable

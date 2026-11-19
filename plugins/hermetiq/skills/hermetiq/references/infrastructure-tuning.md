@@ -128,16 +128,28 @@ sampled).
    - Read `data.scope` (`mounted_only` by default; pass `includeUnmounted=true`
      only when inspecting orphaned ConfigMap generations), `data.scopeReason`,
      and each entry's `mounted` field (`mounted`, `unmounted`, or `unknown`).
-   - Take the `CAS`/`AC`/`ISCC`/`FSAC` store mapping from
+   - Take the `CAS`/`CMS`/`AC`/`ISCC`/`FSAC` store mapping from
      `data.configurations[].stores` and `data.configurations[].fields`, never
      from filename substrings or user labels (`store` filters semantic
-     configuration fields, not filenames).
+     configuration fields, not filenames). `cms` (chunk mapping store) appears
+     only with a CDC CAS.
    - Read `data.geometry.status`, `reason`, and each `data.geometry.stores[]`
      entry's `status`: quote `blockSizeBytes`, `usableCapacityBytes`, and
-     `maximumBlobSizeBytes` with `data.geometry.sectorSizeAssumption` only for
-     `computed` entries. `device_size_unknown` requires the operator's raw device
-     size; `invalid` means a layout `bb-storage` rejects. Empty `findings` does
-     not prove configuration correctness or adequate sizing.
+     `maximumObjectSizeBytes` with its `objectKind` and
+     `data.geometry.sectorSizeAssumption` only for `computed` entries.
+     `maximumBlobSizeBytes` is present only when `objectKind` is `blob`; a
+     `chunk` or `chunk_mapping` block size is never a blob-size limit (under
+     CDC, `contentAddressableStorageServer.maximumChunkCount` and the `cms`
+     block bound the largest blob). `unavailable` (on-prem:
+     `jsonnet_not_configured`) and `not_permitted` supply no geometry;
+     `device_size_unknown` requires the operator's raw device size; `invalid`
+     means a layout `bb-storage` rejects. Missing geometry is not zero
+     capacity. Empty `findings` does not prove configuration correctness or
+     adequate sizing.
+   - Determine the config's shape: a CAS with `chunkStorage` /
+     `chunkMappingStorage`, or a `contentAddressableStorageServer`, is CDC;
+     otherwise pre-CDC. Name fields in that shape (see Configuration schemas in
+     `references/REFERENCE.md`).
    - Call `get_buildbarn_config(component=...)` using the bare file key (e.g.,
      `storage.jsonnet`) to inspect key-location-map sizing and other settings.
    - When `analyze_buildbarn_storage` is absent from `tools/list`, check whether
@@ -152,16 +164,21 @@ sampled).
      `list_buildbarn_config_roots` for service roots. A field's reported type is
      a bare message name without package, so resolve a full `fqn` from
      `nested_message.fqn` at `depth >= 1` or via `search_buildbarn_config_schema`
-     before calling `describe_buildbarn_config_type`.
+     before calling `describe_buildbarn_config_type`. Pass `schema` (`cdc` or
+     `pre_cdc`) once the config's shape is known; when omitted, the deployed
+     storage schema is tried first. Check `data.schema` (and `schemas[]` on
+     search results and roots) for which schema answered; bb-browser exists
+     only in `pre_cdc`.
 2. **Corroborate with runtime health:** When `get_storage_health` is listed, call
    `get_storage_health(timeRange="24h")` (or the requested window, optionally
-   filtered by `storageType`: `"cas"`, `"ac"`, `"iscc"`, or `"fsac"`). If absent,
-   state that runtime health is unavailable.
+   filtered by `storageType`: `"cas"`, `"ac"`, `"iscc"`, or `"fsac"`; there is
+   no `cms` telemetry). If absent, state that runtime health is unavailable.
 3. **Verify persistence and geometry before recommending changes:**
    - If geometry must be derived manually from complete config and device-size
      evidence: `blockSize = floor(blocksBytes / sectorSize / totalBlocks) * sectorSize`,
      and `usableCapacity = blockSize * (oldBlocks + currentBlocks + newBlocks)`.
-     One block is the maximum storable blob.
+     One block is the largest object the store holds: the largest blob only
+     for an unchunked store, not for a CDC chunk or chunk mapping store.
    - A store survives restarts only when all three pieces persist together: the
      blocks, the key-location map, and the `persistent` state directory. Verify
      mounts, backing storage, and lifecycle for all three; an in-memory map is
@@ -210,7 +227,8 @@ unknown without a discard counter or timestamp.
   `FSAC`) **must use 1** or `bb-storage` refuses to start.
 - `spareBlocks` (typical: 3): buffer so ongoing reads finish before rotation.
 - **Key-location map:** `keyLocationMapMaximumGetAttempts` (recommended: 16) and
-  `keyLocationMapMaximumPutAttempts` (recommended: 64). In-memory maps use ~64 B
+  `keyLocationMapMaximumPutAttempts` (recommended: 64); under CDC,
+  `keyLocationMap.maximumGetAttempts` / `maximumPutAttempts`. In-memory maps use ~64 B
   per entry; on-disk maps use ~66 B per record. Coupling: expanding block
   storage increases live object counts, so evaluate map headroom alongside disk
   changes.
