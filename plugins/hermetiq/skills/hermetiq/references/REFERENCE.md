@@ -635,7 +635,9 @@ without changing the declared input hash. This causes:
   where configured.
 - **Platform properties**: Key-value pairs that match actions to compatible workers
   (operating system family, container image, instruction set architecture, etc.)
-- **Content Addressable Storage**: Stores all blobs (inputs, outputs) by content hash
+- **Content Addressable Storage**: Stores all blobs (inputs, outputs) by content hash. With
+  content-defined chunking (CDC), it is two stores: chunks, plus a chunk mapping store
+  (`cms`) that lists each large blob's chunks
 - **Action Cache**: Maps action keys to result metadata (output digests)
 - **Completeness checking**: Validates Action Cache entries reference blobs that still exist
   in Content Addressable Storage before returning them
@@ -691,17 +693,41 @@ collection:
    sources. Too few risks `No unused blocks available` write failures.
 
 **Key sizing formula**: `block size = floor(blocks bytes / sector size / total_blocks) * sector size`,
-and one block is the **maximum storable blob**. The sector size is the host's
+and one block is the **largest object** that store holds. The sector size is the host's
 `max(st_blksize, page size)` (4096 bytes in practice), and a file is rounded up to whole sectors.
 More than 100 total blocks is a startup failure. `analyze_buildbarn_storage` returns these values
 per store under `data.geometry.stores[]` (`blockSizeBytes`, `usableCapacityBytes`,
-`maximumBlobSizeBytes`, with `data.geometry.sectorSizeAssumption`). Check `data.geometry.status`
-and `reason` first: `unavailable` and `not_permitted` do not supply geometry. Even when it is
-`computed`, inspect each store's status and quote only computed entries rather than recomputing
-them. A `device_size_unknown` entry needs the actual raw device size before calculation; an
-`invalid` entry identifies a layout bb-storage rejects. Missing geometry is not zero capacity.
+`maximumObjectSizeBytes`, `objectKind`, with `data.geometry.sectorSizeAssumption`). Quote
+`maximumObjectSizeBytes` together with `objectKind`:
+- `blob` (an unchunked store): one block is the largest blob, and `maximumBlobSizeBytes` is
+  reported only here.
+- `chunk` (a CDC CAS's chunk store): a blob spans many blocks, so the block size is **not** a
+  blob-size limit.
+- `chunk_mapping` (the `cms` store): one blob's chunk list (36 bytes per chunk) must fit in one
+  block.
 
-**Key-location map configuration**:
+Under CDC the largest blob is bounded by `contentAddressableStorageServer.maximumChunkCount` and
+by how many chunk entries fit in one `cms` block; never present a `chunk` or `chunk_mapping`
+block size as a blob limit. Check `data.geometry.status` and `reason` first: `unavailable` (on
+on-prem installs, `reasonCode` `jsonnet_not_configured`) and `not_permitted` do not supply
+geometry. Even when it is `computed`, inspect each store's status and quote only computed entries
+rather than recomputing them. A `device_size_unknown` entry needs the actual raw device size
+before calculation; an `invalid` entry identifies a layout bb-storage rejects. Missing geometry is
+not zero capacity.
+
+**Configuration schemas**: a configuration whose CAS has `chunkStorage` / `chunkMappingStorage`,
+or that sets `contentAddressableStorageServer`, uses the CDC schema (Buildbarn chart 0.10.0+);
+otherwise it is pre-CDC (chart 0.9.x). The CDC schema nests the key-location map
+(`keyLocationMap { inMemory | onBlockDevice, maximumGetAttempts, maximumPutAttempts }`), renames
+`browserUrl` to `portalUrl` (scheduler: `deprecatedPortalUrl`) and `adminHttpServers` /
+`adminRoutePrefix` to `deprecated*`, and removes `dataIntegrityValidationCache` and `zstdPool`;
+bb-browser and bb-replicator exist only pre-CDC. Name fields in the shape the deployed config
+uses. Raw configs are migrated at a namespace's cutover with
+`bep-nats buildbarn-config migrate [--check] [--chart-dir DIR] PATH...`; chart-values-only
+installs need no migration.
+
+**Key-location map configuration** (pre-CDC flat names; CDC uses
+`keyLocationMap.maximumGetAttempts` / `maximumPutAttempts`):
 - `keyLocationMapMaximumGetAttempts`: 16 (recommended). Controls hash slot probes before
   declaring a miss. Unset or zero makes every lookup probe one slot.
 - `keyLocationMapMaximumPutAttempts`: 64 (recommended). Unset or zero silently drops every insert.
@@ -892,7 +918,7 @@ remembered numbers. Fetch the live values with `analyze_buildbarn_storage` (conf
 secret scanning, and computed block geometry where available) without a store filter, followed
 by `get_buildbarn_config` (raw jsonnet). Both return only
 ConfigMaps an installed Buildbarn workload mounts or reads unless you pass `includeUnmounted=true`;
-check `data.scope`, `data.scopeReason`, and each entry's `mounted` field. Take the CAS/AC/ISCC/FSAC
+check `data.scope`, `data.scopeReason`, and each entry's `mounted` field. Take the CAS/CMS/AC/ISCC/FSAC
 mapping from `data.configurations[].stores` and the `data.configurations[].fields` behind it rather
 than from filenames, then correlate with
 `get_storage_health` / `get_worker_fleet_health` / `get_scheduler_health` before recommending
