@@ -39,7 +39,8 @@ Read these when the investigation needs deeper domain detail or full playbooks:
 - `references/bazel-optimization.md`: `.bazelrc` optimizations (Bazel 5–9
   compatibility matrix) and build graph anti-patterns.
 - `references/change-impact.md`: change-impact snapshots, `get_change_impact`,
-  `find_impacted_targets`, `explain_target_impact`, coverage verdicts, Barn Owl
+  `find_impacted_targets`, `explain_target_impact`, `get_change_impact_trends`,
+  `find_unrelated_test_failures`, `get_change_report`, coverage verdicts, Barn Owl
   delegation, and CI setup.
 
 ## MCP Alignment and Capability Boundaries
@@ -92,13 +93,16 @@ feature availability:
   three-call flow applies only to `kind="build"`. For `kind="invocation"`, preserve
   the returned `data.invocationId` and follow the known-invocation steps; never
   replace it with the parent build's primary/latest attempt.
-- **Change impact:** `get_change_impact`, `find_impacted_targets`,
-  `explain_target_impact`, and `explain_change_impact` register only when the
-  target graph service is enabled. Always call `get_change_impact` first and
-  **stop** on `no_snapshot` or `snapshot.available=false` without calling the
-  other change-impact tools; never infer change impact from the targets an invocation
-  built or tested. Point to `get_hermetiq_setup` (`changeImpact` block) or
-  `references/change-impact.md` for CI setup.
+- **Change impact:** snapshot, trend, failure and report tools register only
+  when the target graph service is enabled. For one invocation, call
+  `get_change_impact` first and stop its target/explain/miss workflow on
+  `no_snapshot` or `snapshot.available=false`; never infer impact from executed
+  targets. Use `get_change_impact_trends` for project time, `find_unrelated_test_failures`
+  for graded outside failures, and `get_change_report` for one change. Read their
+  unavailable fields and completeness reasons. Binding coverage can be a lower
+  bound; absent cost and unknown coverage remain unmeasured. Point to
+  `get_hermetiq_setup` (`changeImpact` block) or `references/change-impact.md`
+  for CI setup.
 
 ## Project, Build, and Invocation Context
 
@@ -259,6 +263,9 @@ feature availability:
 | Filter discovery | `list_filter_values` | Supports `branch`, `build_user`, `command`, `commit_sha`, `host`, `platform_name`, `repository`, `role`, `status` (static lowercase vocabulary), `tag` (project-wide key/values), `user`; `status` and `tag` reject `includeCounts=true` |
 | "Can we use remote execution / did we get workers?" | `get_hermetiq_setup` (`remoteExecution` block) on Hermetiq Cloud | `list_rbe_workers` for the shared namespace's pools; see Shared Buildbarn Service below — zero recorded actions proves neither configuration nor worker availability |
 | Change impact / selective-testing coverage | `get_change_impact` first | Stop on `no_snapshot` or `snapshot.available=false`; otherwise `find_impacted_targets`, `explain_target_impact`, `find_unexplained_cache_misses`, or `check_change_coverage` (when listed); see `references/change-impact.md` |
+| Project test-time opportunities | `get_change_impact_trends(lookback="7d")` | Keep recoverable, full-run-rule and unknown-policy time separate; report ranking, execution, pricing and binding coverage |
+| Outside test failures | `find_unrelated_test_failures` | Suspected unrelated is not demonstrated flaky; check same-head/config uncached pass/fail evidence |
+| Pull request / commit coverage | `get_change_report` with exactly one anchor | Latest attempts determine lane outcomes; all retries contribute time; expected lanes remain unknown |
 
 ## Core Diagnostic Flows
 

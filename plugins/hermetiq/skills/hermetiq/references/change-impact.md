@@ -4,7 +4,7 @@
 # Change impact
 
 Reference topic for the Hermetiq plugin skill: what a change-impact snapshot
-is, the four read-only tools that read it, the intent map, when to delegate
+is, the seven read-only tools that read it, the intent map, when to delegate
 to Barn Owl, and the CI setup that produces the snapshots.
 
 ## What a snapshot is
@@ -16,7 +16,7 @@ invocation to the pair. Hermetiq computes the impacted targets, their
 dependency and package distances, the root-cause explanation of each impacted
 target, and the coverage join against the invocation's own BEP targets and
 tests. The impacted set CI computed with its live Bazel is the authoritative
-one for that invocation (`impactSource: ci`); a set the server computed from
+one for that change key (`impactSource: ci`); a set the server computed from
 the pair alone is `impactSource: server`, and a changed module graph
 under-approximates it.
 
@@ -29,18 +29,22 @@ server without it, and so is the `explain_change_impact` prompt.
 
 | Tool | Call it for | Read |
 | --- | --- | --- |
-| `get_change_impact(invocationId)` | every change-impact question, first | `snapshot.available` before anything else; `counts`; `coverage.invocation` and `coverage.build`, each with its own verdict (`covered`, `gap`, `not_assessable`, `no_tests_impacted`) and at most 25 nearest `gapTargets`; `distanceHistogram`; `directChanges` |
-| `find_impacted_targets(invocationId, ...)` | the list behind a count: `testsOnly=true, coverage=not_executed` for the selective-testing gap, `coverage=failed` for failed impacted targets, `impact=direct` for the changes themselves, `maxPackageDistance` or `maxTargetDistance` for the nearest | rows ordered by target distance, package distance, label; `hasMore` and `nextOffset` |
+| `get_change_impact(invocationId)` | an invocation-level impact question, first | `snapshot.available` before anything else; `counts`; `coverage.invocation` and `coverage.build`, each with its own verdict (`covered`, `gap`, `build_failed`, `not_assessable`, `no_tests_impacted`) and at most 25 nearest `gapTargets`; `distanceHistogram`; `directChanges` |
+| `find_impacted_targets(invocationId, ...)` | the list behind a count: `testsOnly=true, coverage=not_executed` to inspect not_run, blocked, excluded and unknown reasons, `coverage=failed` for failed impacted targets, `impact=direct` for the changes themselves, `maxPackageDistance` or `maxTargetDistance` for the nearest | rows ordered by target distance, package distance, label; `hasMore` and `nextOffset` |
 | `explain_target_impact(invocationId, target)` | one target: the one the user named, or a failed impacted one | `rootCauses` with a `path` from the root cause down to the target; `rootCauseTotal` beside the rows, `truncated`, `searchBounded`; `removed` |
 | `find_unexplained_cache_misses(invocationId)` | cache misses on targets the change did not touch: hermeticity leaks; call it when `get_change_impact` reports `cacheMisses.notImpactedChanged` above 0 | `classCounts`; only individually verified `leak` misses are findings (the previous hit ran at this change's base or head tree with matching snapshot fingerprint and captured build configuration); `unverified` includes unmatched or unchecked baselines; `baselineChecksTruncated` marks unchecked candidates due to the 25-miss budget or concurrent updates; miss totals come from the cache rollups, and misses counted there but not kept as individual events come back as `NOT_RECORDED` groups classed `not_assessable`, with no rows in `find_cache_events`; `complete` remains false without a cache-ingestion barrier, including after the invocation finishes (`cache_ingestion_unknown`) |
+| `get_change_impact_trends(lookback, ...)` | uncached test time, recoverable opportunities and required-test hot spots across a project | inside, recoverable, full-run-rule and unknown-policy time separately; ranking coverage; execution and pricing coverage; provisional share; binding evidence; unavailable fields and reasons. Rankings default to 20 and full-run glob rules to 100, with configurable caps and explicit truncation. |
+| `find_unrelated_test_failures(lookback, ...)` | failures outside the change's dependency graph | evidence grade, uncached failure time, distinct changes, at most three examples per test; weak evidence is opt-in and mass failures are excluded. Ordered by grade then time. |
+| `get_change_report(anchor)` | one pull request, commit, invocation or build | exactly one of pullRequestNumber, commitSha, invocationId or buildId; optional headTree. Latest attempts determine lane outcomes; all retries contribute time. Read unbound invocations and completeness reasons; the expected lane set is not declared. |
 
 When `get_change_impact` fails with `no_snapshot`, or `snapshot.available` is
 false, stop. `pending_snapshots` and `computing` mean the pair is still
 arriving or being compared: say when to retry. `no_snapshot`, `config_mismatch`
 and `failed` are CI setup gaps: give the setup below (on Hermetiq Cloud,
 `get_hermetiq_setup` returns it as the `changeImpact` block). Never infer
-impact from the targets the invocation built or tested, and do not call the
-other change-impact tools for that invocation.
+impact from the targets the invocation built or tested, and do not call its
+target-list, explain or miss tools. Project trend and change-report requests are
+separate scopes; read their unavailable fields and completeness reasons.
 
 Readings that are expected, not contradictions:
 
@@ -63,6 +67,52 @@ Readings that are expected, not contradictions:
   that shares the snapshot pair (`invocationIds` names them), so a test one
   lane skipped but another ran counts as covered there only.
 
+## Reading coverage, time and evidence
+
+The canonical impacted set is selected once per project, base tree, head tree
+and configuration. A CI-computed set outranks the server fallback; conflicting
+sets are never unioned. Each invocation still has its own test inventory.
+`not_run` is a selection gap, `blocked` is a build failure, `excluded` is an
+intentional lane exclusion, and `unknown` cannot establish coverage. The old
+not-executed counter includes all four; absent split counters are unmeasured.
+Barn Owl keeps `failed_impacted` above `build_failed` while the coverage verdict
+itself remains about which impacted tests ran.
+
+Use **outside the change's dependency graph**, never "could not be affected".
+A failed inside test is **failed inside the change**, never "caused by the
+change". An outside failure is **suspected unrelated**. `demonstrated_flaky`
+requires an uncached pass and fail of the same label on the same head tree and
+configuration; `preexisting` requires an uncached failure at the base tree in
+the same project. Full-run-rule and unknown-policy evidence stays weak unless
+the stronger same-input evidence establishes a grade.
+
+Trend and failure lookbacks are at most 30 days. Their pattern filters test
+labels, unlike `get_test_trends`, whose pattern selects invocation command-line
+patterns. Label filtering makes exact totals and ranking denominators unavailable:
+do not substitute whole-invocation totals. Rankings include findings at or above
+the configured duration floor (default 1000 ms) and report the retained share
+of exact test time. Counts are supporting context; rank and compare by time.
+
+Binding coverage counts declared snapshot keys or stored facts over declared CI
+test/coverage invocations, including failures before discovery. It is a lower
+bound when `binding_evidence_partial` is present: API or legacy links may lack
+that evidence. `facts_incomplete` independently means observed bindings lack
+current facts. Missing facts do not prove an invocation was unbound.
+
+Worker time runs from each completed action's worker start through completion;
+BEP uncached test attempt time remains separate. Late or missing rows stay unavailable. Preserve
+measured zero cost, but never turn absent cost into zero. Report priced time and
+pricing coverage alongside cost. Matched actions can exceed expected BEP attempts
+because of action retries, so execution coverage can exceed 1. A zero denominator
+leaves the ratio absent. The optional cache-miss section is read only when asked.
+Seed/module changes without recorded glob patterns retain full-run-rule time and
+mark the rule list `selection_rule_patterns_unavailable`.
+
+Cache-miss groups carry execution time, priced time, cost and pricing coverage.
+Within each class they are ordered by execution time; the verification budget
+checks the most expensive test actions first. A changed action key alone is not
+a proven leak. Preserve pending, cold, unverified and not-assessable distinctions.
+
 ## Intent map
 
 | The user asks | Do |
@@ -73,6 +123,9 @@ Readings that are expected, not contradictions:
 | "Which impacted targets are closest to the change?" | `find_impacted_targets(maxPackageDistance=N)` or `maxTargetDistance`; the rows are already ordered by distance |
 | "Which impacted targets failed, and why?" | `find_impacted_targets(coverage=failed)`, then `explain_target_impact` for up to three of them |
 | "Why did unchanged targets miss the cache?" / "Do we have a hermeticity leak?" | `get_change_impact`, then `find_unexplained_cache_misses`; for each `leak` group, `find_cache_events(target=..., hit=miss, includeMissAnalysis=true)` names the part of the action key that moved (environment, command, inputs) |
+| "Which expensive tests could selective CI skip?" | `get_change_impact_trends(lookback="7d")`; report recoverable time separately from full-run-rule and unknown-policy time, with coverage limits |
+| "Which failures are probably unrelated?" | `find_unrelated_test_failures`; quote the evidence grade and same-input evidence without attributing causation |
+| "Did this PR run the tests it affects?" | `get_change_report(pullRequestNumber="...")`; report observed latest lanes and unknown completeness |
 | "Set up change impact for my CI" | on Hermetiq Cloud, `get_hermetiq_setup` and its `changeImpact` block; otherwise the setup below |
 
 ## Delegation rule
