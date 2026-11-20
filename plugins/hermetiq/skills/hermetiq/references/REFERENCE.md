@@ -493,6 +493,13 @@ Profile trend workflow:
 - `summarize_project_trends.coreMetrics.cacheHitRate`, `successRate`, and
   `remoteEnabledRate` use percentages (0–100). `buildCountChange` and
   `durationChange` are relative percentage changes, omitted without a valid baseline.
+  `cacheHitRate` is `100 * totalCacheHits / (totalExecutions - totalInternal)`,
+  rounded to one decimal place. It uses BEP execution counters excluding internal
+  work, not all executions and not Action Cache lookup attempts. When that
+  denominator is nonpositive, the returned zero is an unavailable-rate sentinel,
+  not a measured 0% hit rate. Keep it separate from `get_cache_trends` and
+  `summarize_cache_events`, whose hit rate uses remote GetActionResult hits divided
+  by hits plus misses.
   `coreMetrics.failed` counts finished invocations with a recorded nonzero exit code
   (including `interrupted`), excluding `unknown` and `in_progress`, so for scopes without
   unfinished rows `passed + failed + unknown = totalInvocations` (`totalBuilds` is a
