@@ -140,7 +140,7 @@ sampled).
      `maximumBlobSizeBytes` is present only when `objectKind` is `blob`; a
      `chunk` or `chunk_mapping` block size is never a blob-size limit (under
      CDC, the `cms` block bounds a stored mapping's entry count, while
-     `contentAddressableStorageServer.maximumChunkCount` limits SplitBlob and
+     `contentAddressableStorageServer.maximumChunkCount` limits RegisterChunkMapping and
      SpliceBlob chunk lists, not all ByteStream uploads). `unavailable` (on-prem:
      `jsonnet_not_configured`) and `not_permitted` supply no geometry;
      `device_size_unknown` requires the operator's raw device size; `invalid`
@@ -178,7 +178,8 @@ sampled).
    or calling CMS healthy. If the tool is absent, runtime health is unavailable.
 3. **Verify persistence and geometry before recommending changes:**
    - If geometry must be derived manually from complete config and device-size
-     evidence: `blockSize = floor(blocksBytes / sectorSize / totalBlocks) * sectorSize`,
+     evidence: `blockSize = floor(sectorCount / totalBlocks) * sectorSize` (file-backed
+     `sectorCount = ceil(sizeBytes / sectorSize)`; raw devices need their actual sector count),
      and `usableCapacity = blockSize * (oldBlocks + currentBlocks + newBlocks)`.
      One block is the largest object the store holds: the largest blob only
      for an unchunked store, not for a CDC chunk or chunk mapping store.
@@ -186,9 +187,10 @@ sampled).
      blocks, the key-location map, and the `persistent` state directory. Verify
      mounts, backing storage, and lifecycle for all three; an in-memory map is
      process-local.
-   - Changing block counts or device size changes the derived block size and
-     causes a persistent store to **discard all existing data on next start** —
-     treat geometry changes as planned cache flushes.
+   - Changing block layout or backing size can cause a persistent store to
+     **discard all existing data on next start**. Redistributing counts while
+     preserving the total leaves block size unchanged but does not establish
+     layout compatibility; treat geometry changes as planned cache flushes.
    - Resolve exact schema paths before naming configuration fields (for block
      device write limits: `blocksOnBlockDevice.source.writeConcurrencyLimit`,
      where `0` means no configured cap on concurrent write syscalls;

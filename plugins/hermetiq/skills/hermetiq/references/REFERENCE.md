@@ -656,9 +656,10 @@ without changing the declared input hash. This causes:
 
 **Request flow**: Bazel client → bb-storage frontend → two paths diverge:
 
-1. **Storage path**: Frontend shards blob requests (Get, Put, FindMissing, ByteStream) across
-   bb-storage backend shards by digest hash. Each shard holds a portion of all content.
-   Frontend is stateless and horizontally scalable.
+1. **Storage path**: The frontend serves blob RPCs and routes storage objects by digest hash.
+   Under CDC, a large blob has multiple chunk objects and a mapping object that can reside
+   on different shards. Reading or uploading one blob can depend on several shards.
+   Inspect the frontend's rendered cache configuration before describing it as stateless.
 
 2. **Execution path**: Frontend forwards Execute requests to bb-scheduler (single instance),
    which maintains per-platform queues and dispatches to bb-worker instances. Each bb-worker
@@ -692,9 +693,11 @@ collection:
    block is recycled. Applies to `blocksOnBlockDevice` with file-backed *and* raw-device
    sources. Too few risks `No unused blocks available` write failures.
 
-**Key sizing formula**: `block size = floor(blocks bytes / sector size / total_blocks) * sector size`,
+**Key sizing formula**: `block size = floor(sector count / total_blocks) * sector size`,
 and one block is the **largest object** that store holds. The sector size is the host's
 `max(st_blksize, page size)` (4096 bytes in practice), and a file is rounded up to whole sectors.
+For a file, `sector count = ceil(sizeBytes / sector size)`; for a raw device, use its
+reported sector count. Sector-aligned file sizes reduce to the familiar byte formula.
 More than 100 total blocks is a startup failure. `analyze_buildbarn_storage` returns these values
 per store under `data.geometry.stores[]` (`blockSizeBytes`, `usableCapacityBytes`,
 `maximumObjectSizeBytes`, `objectKind`, with `data.geometry.sectorSizeAssumption`). Quote
@@ -705,12 +708,12 @@ per store under `data.geometry.stores[]` (`blockSizeBytes`, `usableCapacityBytes
   record is ZSTD encoded; neither the decoded chunk's digest size nor a whole blob's size
   is the physical record size. A blob spans many chunks, so the block size is **not** a
   blob-size limit.
-- `chunk_mapping` (the `cms` store): one blob's chunk list (36 bytes per chunk) must fit in one
-  block.
+- `chunk_mapping` (the `cms` store): one blob's chunk list (36 bytes per SHA-256 chunk digest plus a
+  32-byte checksum) must fit in one block.
 
 Under CDC a CMS block bounds the number of entries in one stored chunk mapping.
 `contentAddressableStorageServer.maximumChunkCount` separately limits the chunk lists
-accepted by SplitBlob and SpliceBlob; it is not a universal ByteStream upload limit.
+accepted by RegisterChunkMapping and SpliceBlob; it is not a universal ByteStream upload limit.
 In the upgraded implementation, an omitted or zero value is a zero RPC chunk-count limit,
 not unlimited. Do not turn a typical chunk size or the approximate `count * min * 1.338`
 planning estimate into a hard blob-size ceiling. Never present a `chunk` or `chunk_mapping`
@@ -766,27 +769,33 @@ what happened on a particular historical restart or that the operator intended o
 a cache-only design. `minimumEpochInterval` controls state sync frequency (default 300
 seconds), which also bounds crash loss to roughly that window. On SIGTERM, data is synced
 before shutdown (two full device syncs — give the pod enough termination grace).
-**Changing any block count or the blocks/device size changes the derived block size, and a
-persistent store discards ALL of its data on the next start** — treat geometry changes as
-planned cache flushes.
+**Changing the block layout can make a persistent store discard ALL of its data on the
+next start** — treat geometry changes as planned cache flushes. Redistributing old, current
+and new counts while preserving their total leaves the derived block size unchanged, but
+does not establish persistence compatibility. Compare the complete layout, not only block size.
 
 #### Sharding
-Distributes blobs across multiple storage backends by digest hash. Each shard has a `weight`
-for proportional allocation.
+Distributes storage objects across backends by digest hash, with a `weight` for proportional
+allocation. Under CDC, chunks and mappings are distinct objects, so unavailable content
+is not proportional to a shard's weight: many blobs can depend on chunks on the same shard.
 
 **Topology options**:
-- **Sharded only**: N shards, each holding 1/N of data. Losing one shard loses that fraction.
-- **Mirrored only**: Two backends replicate everything. RAID-1 behavior.
-- **Sharded + mirrored**: Each shard is mirrored. Enables rolling upgrades and single-node
-  failure tolerance. Recommended for production.
+- **Sharded only**: Objects are assigned to shards; no redundancy follows from sharding.
+  A temporary outage makes assigned objects unavailable, not necessarily physically lost.
+- **Mirrored only**: Redundant backends can repair missing objects under the configured
+  replication rules. Verify Get, Put and FindMissing behavior independently.
+- **Sharded + mirrored**: Combines distribution and redundant copies. This alone does not
+  prove rolling-upgrade or node-outage tolerance: the configured mirrored/readFallback
+  paths may fall back only on NotFound and propagate Unavailable. Trace each wrapper's
+  error behavior before claiming failover.
 
 **Replicator types** (for mirrored setups):
 - `local`: Immediate client-side copy. Simple but can be slow under high concurrency.
 - `queued`: Deduplicated queue with sequential execution. Better for high-write workloads.
 - `concurrency_limiting`: Bounded concurrent requests. Prevents network saturation.
 
-**Important**: Mirrored replication degrades heavily under high eviction rates. If eviction
-is frequent, increase storage capacity before adding replication.
+Repair traffic can amplify load when copies are missing. Establish discard activity,
+request traffic and backend capacity before recommending more storage or replication.
 
 #### Completeness Checking
 Wraps the Action Cache. Before returning an action result, validates all referenced output
