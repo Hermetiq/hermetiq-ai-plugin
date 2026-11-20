@@ -310,6 +310,12 @@ diagnosis. It does not prove a size-class cause or successful retry. Only
 `supersededBySuccessfulAttempt: true` establishes later success at the same
 digest; follow the failure flow in `SKILL.md` when the cause remains unresolved.
 
+Keep incident-time and current state separate. A historical Kubernetes warning
+is not an active fault without current corroboration. Today's ready workers,
+queue inventory, or saved scheduler source cannot establish what was registered
+or loaded during a past failed invocation. Use time-aligned events, metrics and
+configuration provenance; otherwise retain the historical cause as unknown.
+
 1. **Confirm invocation status and failure class:** Call `get_invocation` and
    record `status`, `exitCode`, `exitCodeName`, and `failureMessage`.
 2. **Partition failed vs. succeeded mnemonics:** Call
