@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "07220a4af925a1503aca82c7f7ee7ee85f69e878",
+  "sourceRevision": "469f6bc8a88ac271f53fd884f73a72c630a2024e",
   "server": "hermetiq-mcp-v2",
   "serverVersion": "0.19.0",
   "tools": [
@@ -20,6 +20,7 @@
     "find_remote_actions",
     "find_slow_invocations",
     "find_unexplained_cache_misses",
+    "find_unrelated_test_failures",
     "get_action_execution",
     "get_build",
     "get_build_details",
@@ -34,6 +35,8 @@
     "get_buildbarn_status",
     "get_cache_trends",
     "get_change_impact",
+    "get_change_impact_trends",
+    "get_change_report",
     "get_config_set",
     "get_config_set_history",
     "get_cost_summary",
@@ -77,6 +80,7 @@
     "list_rbe_workers",
     "list_targets",
     "list_worker_pools",
+    "preview_size_class_training",
     "render_config_file",
     "resolve_build_or_invocation",
     "save_config_set",
