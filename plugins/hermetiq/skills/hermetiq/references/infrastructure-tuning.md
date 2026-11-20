@@ -279,13 +279,20 @@ unavailable, report the cache settings as unknown, not disabled. Keep these laye
 
 ### Platform Queue Management
 
-Matching between an action's requested platform and a worker pool's advertised
-platform is **exact string equality** on the marshaled, lexicographically sorted
-`platformProperties` (`platformQueueKey` in `list_rbe_workers`). When updating a
-platform property value, update all three places together:
-1. Worker pool advertised `platformProperties`.
-2. Scheduler action-router / demultiplexing entries keyed on that platform.
-3. Autoscaler (KEDA/Prometheus) queries selecting on the serialized platform string.
+Matching uses the **final routed platform**, compared by exact string equality
+on the marshaled, lexicographically sorted `platformProperties`
+(`platformQueueKey` in `list_rbe_workers`), together with the instance-name prefix.
+Trace each selected action router: a demultiplexing backend can match the
+client's requested platform and then use a nested static extractor to replace
+it with a different worker platform. Its selector and destination need not be
+equal; that difference alone is not a routing mismatch. The rewrite does not
+change the Action or its digest and therefore does not rewrite Action Cache
+identity. Do not infer a nested backend's behavior from the default router.
+
+When changing a worker platform, reconcile its advertised properties, the
+router's destination (and any intentionally changed client selector), and
+autoscaler queries selecting the serialized destination platform. Preserve
+intentional input-to-destination rewrites.
 
 | Bazel outcome | Remote executions | Meaning |
 |---------------|-------------------|---------|
