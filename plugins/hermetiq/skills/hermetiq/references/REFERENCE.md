@@ -686,7 +686,7 @@ collection:
    No copy-forward overhead for reads.
 3. **New blocks**: Where new writes and copy-forward data land. Content Addressable Storage
    should use 3 (2-4 acceptable) to spread write load and stagger expiration. The Action
-   Cache, Initial Size Class Cache, and File System Access Cache are mutable stores and
+   Cache, Chunk Mapping Storage (CMS), Initial Size Class Cache, and File System Access Cache are mutable stores and
    **must use 1** — bb-storage refuses to start them otherwise.
 4. **Spare blocks** (typical: 3): Buffer so ongoing reads can complete before a rotated-out
    block is recycled. Applies to `blocksOnBlockDevice` with file-backed *and* raw-device
@@ -701,13 +701,19 @@ per store under `data.geometry.stores[]` (`blockSizeBytes`, `usableCapacityBytes
 `maximumObjectSizeBytes` together with `objectKind`:
 - `blob` (an unchunked store): one block is the largest blob, and `maximumBlobSizeBytes` is
   reported only here.
-- `chunk` (a CDC CAS's chunk store): a blob spans many blocks, so the block size is **not** a
+- `chunk` (a CDC CAS's chunk store): one encoded chunk record must fit in a block. The
+  record is ZSTD encoded; neither the decoded chunk's digest size nor a whole blob's size
+  is the physical record size. A blob spans many chunks, so the block size is **not** a
   blob-size limit.
 - `chunk_mapping` (the `cms` store): one blob's chunk list (36 bytes per chunk) must fit in one
   block.
 
-Under CDC the largest blob is bounded by `contentAddressableStorageServer.maximumChunkCount` and
-by how many chunk entries fit in one `cms` block; never present a `chunk` or `chunk_mapping`
+Under CDC a CMS block bounds the number of entries in one stored chunk mapping.
+`contentAddressableStorageServer.maximumChunkCount` separately limits the chunk lists
+accepted by SplitBlob and SpliceBlob; it is not a universal ByteStream upload limit.
+In the upgraded implementation, an omitted or zero value is a zero RPC chunk-count limit,
+not unlimited. Do not turn a typical chunk size or the approximate `count * min * 1.338`
+planning estimate into a hard blob-size ceiling. Never present a `chunk` or `chunk_mapping`
 block size as a blob limit. Check `data.geometry.status` and `reason` first: `unavailable` (on
 on-prem installs, `reasonCode` `jsonnet_not_configured`) and `not_permitted` do not supply
 geometry. Even when it is `computed`, inspect each store's status and quote only computed entries
@@ -720,7 +726,10 @@ or that sets `contentAddressableStorageServer`, uses the CDC schema (Buildbarn c
 otherwise it is pre-CDC (chart 0.9.x). The CDC schema nests the key-location map
 (`keyLocationMap { inMemory | onBlockDevice, maximumGetAttempts, maximumPutAttempts }`), renames
 `browserUrl` to `portalUrl` (scheduler: `deprecatedPortalUrl`) and `adminHttpServers` /
-`adminRoutePrefix` to `deprecated*`, and removes `dataIntegrityValidationCache` and `zstdPool`;
+`adminRoutePrefix` to `deprecated*`, and removes the old `dataIntegrityValidationCache`.
+Compression-pool support depends on the service and binary revision: the upgraded Hermetiq
+bb-storage fork supports top-level `zstdPool` and `supportedCompressors`. Resolve the exact
+service path against its schema before recommending it or claiming it was removed;
 bb-browser and bb-replicator exist only pre-CDC. Name fields in the shape the deployed config
 uses. Raw configs are migrated at a namespace's cutover with
 `bep-nats buildbarn-config migrate [--check] [--chart-dir DIR] PATH...`; chart-values-only
@@ -737,6 +746,9 @@ installs need no migration.
   In-memory maps cost ~64 bytes per entry of eagerly allocated heap; on-disk maps ~66 bytes
   per record, with the record count automatically rounded down to a prime (no need to
   pre-compute primes).
+- On CDC releases, `cas_blob_size_*` measures **uncompressed chunk digest sizes**, not
+  physical compressed records or whole blob sizes. Its bucket bounds cannot supply the
+  representative stored-record mean needed for disk-to-key-location-map sizing.
 - An undersized map fails **silently**: inserts displace older entries and eventually drop,
   so blob bytes stay on disk but become unreachable. Watch the `hash_get_too_many_attempts`
   and `hash_put_too_many_iterations` rows in `get_storage_health`; a positive peak with
