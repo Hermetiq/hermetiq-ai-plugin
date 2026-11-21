@@ -139,8 +139,9 @@ sampled).
      `data.geometry.sectorSizeAssumption` only for `computed` entries.
      `maximumBlobSizeBytes` is present only when `objectKind` is `blob`; a
      `chunk` or `chunk_mapping` block size is never a blob-size limit (under
-     CDC, `contentAddressableStorageServer.maximumChunkCount` and the `cms`
-     block bound the largest blob). `unavailable` (on-prem:
+     CDC, the `cms` block bounds a stored mapping's entry count, while
+     `contentAddressableStorageServer.maximumChunkCount` limits RegisterChunkMapping and
+     SpliceBlob chunk lists, not all ByteStream uploads). `unavailable` (on-prem:
      `jsonnet_not_configured`) and `not_permitted` supply no geometry;
      `device_size_unknown` requires the operator's raw device size; `invalid`
      means a layout `bb-storage` rejects. Missing geometry is not zero
@@ -171,11 +172,14 @@ sampled).
      only in `pre_cdc`.
 2. **Corroborate with runtime health:** When `get_storage_health` is listed, call
    `get_storage_health(timeRange="24h")` (or the requested window, optionally
-   filtered by `storageType`: `"cas"`, `"ac"`, `"iscc"`, or `"fsac"`; there is
-   no `cms` telemetry). If absent, state that runtime health is unavailable.
+   filtered by `storageType` from its current schema). Updated servers support
+   `"cas"`, `"cms"`, `"ac"`, `"iscc"`, and `"fsac"`. Older servers omit CMS
+   serving metrics; state that coverage gap rather than substituting CAS health
+   or calling CMS healthy. If the tool is absent, runtime health is unavailable.
 3. **Verify persistence and geometry before recommending changes:**
    - If geometry must be derived manually from complete config and device-size
-     evidence: `blockSize = floor(blocksBytes / sectorSize / totalBlocks) * sectorSize`,
+     evidence: `blockSize = floor(sectorCount / totalBlocks) * sectorSize` (file-backed
+     `sectorCount = ceil(sizeBytes / sectorSize)`; raw devices need their actual sector count),
      and `usableCapacity = blockSize * (oldBlocks + currentBlocks + newBlocks)`.
      One block is the largest object the store holds: the largest blob only
      for an unchunked store, not for a CDC chunk or chunk mapping store.
@@ -183,9 +187,10 @@ sampled).
      blocks, the key-location map, and the `persistent` state directory. Verify
      mounts, backing storage, and lifecycle for all three; an in-memory map is
      process-local.
-   - Changing block counts or device size changes the derived block size and
-     causes a persistent store to **discard all existing data on next start** —
-     treat geometry changes as planned cache flushes.
+   - Changing block layout or backing size can cause a persistent store to
+     **discard all existing data on next start**. Redistributing counts while
+     preserving the total leaves block size unchanged but does not establish
+     layout compatibility; treat geometry changes as planned cache flushes.
    - Resolve exact schema paths before naming configuration fields (for block
      device write limits: `blocksOnBlockDevice.source.writeConcurrencyLimit`,
      where `0` means no configured cap on concurrent write syscalls;
@@ -207,15 +212,15 @@ unknown without a discard counter or timestamp.
 
 | Metric | Unit & Aggregation | Meaning |
 |--------|--------------------|---------|
-| `operation_rate`, `<type>_operation_rate` | `ops_per_second`, `peak` | Blob-access operations across all stores or per store (`cas_`, `ac_`, `iscc_`, `fsac_`) |
+| `operation_rate`, `<type>_operation_rate` | `ops_per_second`, `peak` | Blob-access operations across all stores or per store (`cas_`, `cms_`, `ac_`, `iscc_`, `fsac_`; check returned coverage) |
 | `<type>_operations_by_op` | `ops_per_second`, `peak` | Split by `labels.operation` (`Get`, `Put`, `FindMissing`); `Get` counts only hits |
 | `<type>_latency_{get,put,findmissing}_{p50,p90,p99}` | `milliseconds`, `average` | Per-operation latency (`ISCC` and `FSAC` serve only `Get` and `Put`) |
 | `<type>_error_rate_pct` | `percent`, `derived` | Excludes `NotFound`, `Canceled`, `AlreadyExists` (`NotFound` is a normal miss) |
 | `<type>_operation_count`, `<type>_error_count` | `ops_per_second`, `average` | Numerator and denominator behind the error rate |
 | `iscc_get_found_pct`, `fsac_get_found_pct` | `percent`, `derived` | `OK / (OK + NotFound)` lookup hit share; lookup outcome only, never an error or sizing signal |
 | `eviction_age_min_shard` | `hours`, `derived` | Minimum shard insertion age of the last discarded block (`eviction_age` can include non-shard local caches). Historical insertion-age context only, not current retention |
-| `cas_blob_size_{p50,p90,p99}` | `bytes`, `bucket_bound` | Histogram bucket boundary (`lowerBound` and `upperBound`), **not** an interpolated size or mean |
-| `cas_blob_size_buckets` | `count`, per `le` | Cumulative blob-size histogram |
+| `cas_blob_size_{p50,p90,p99}` | `bytes`, `bucket_bound` | Histogram bucket bounds (`lowerBound`, `upperBound`), **not** an interpolated size or mean. CDC measures uncompressed chunk digest sizes, not whole blobs or physical encoded records |
+| `cas_blob_size_buckets` | `count`, per `le` | Cumulative digest-size histogram; under CDC it cannot establish a stored-record mean for key-location-map sizing |
 | `hash_{get_too_many_attempts,put_too_many_iterations}` | `ops_per_second`, `peak` | Sampled peak of key-location-map probe exhaustion; indicates pressure occurred in the window, not sustained occupancy or a new map size |
 | `eviction_set_ops` | `ops_per_second`, `instant` | Cluster-wide eviction-set rate (per-second rate despite the `rate1h` recording-rule lookback name) |
 | `device_io_utilization`, `device_write_latency`, `device_write_throughput`, `device_queue_depth` | node-level | Shared node disk metrics for nodes hosting storage pods (not store-isolated) |
@@ -223,7 +228,7 @@ unknown without a discard counter or timestamp.
 **Block and Key-Location Map Tradeoffs:**
 - `oldBlocks` (typical: 8): reads copy blobs forward to `newBlocks` (pseudo-LRU).
 - `currentBlocks` (typical: 24–30): stable storage with no copy-forward overhead.
-- `newBlocks`: writes land here. CAS uses 3 (2–4); mutable stores (`AC`, `ISCC`,
+- `newBlocks`: writes land here. CAS uses 3 (2–4); mutable stores (`CMS`, `AC`, `ISCC`,
   `FSAC`) **must use 1** or `bb-storage` refuses to start.
 - `spareBlocks` (typical: 3): buffer so ongoing reads finish before rotation.
 - **Key-location map:** `keyLocationMapMaximumGetAttempts` (recommended: 16) and
@@ -239,6 +244,27 @@ unknown without a discard counter or timestamp.
 
 ### Worker Concurrency, File Cache, and Input Population
 
+Read the **evaluated worker entrypoint and its imports** before describing effective
+cache settings. A RbeWorker's resource limits, a mounted library, or a scheduler render
+does not prove which CAS settings that worker consumes. If effective worker evidence is
+unavailable, report the cache settings as unknown, not disabled. Keep these layers distinct:
+
+- CDC `blobstore.contentAddressableStorage.chunkCache` retains decoded chunks in process
+  memory, avoiding repeated decoding and digest verification. `cacheSize` counts entries,
+  not bytes. `chunkMappingCache` caches parsed mapping objects; `cdcParameterCache` caches
+  per-instance CDC parameters. Each has its own entry count, TTL and replacement policy.
+- `blobstore.contentAddressableStorage.chunkStorage.readCaching.fast` may hold encoded
+  chunks in a worker-local disk store. Its block capacity and key-location map are separate
+  from the decoded in-memory cache, the shared storage tier, and the writable file pool.
+- RepMaxCDC canonical chunks are smaller than `2 * minChunkSizeBytes` (the final chunk
+  can be smaller than the minimum). `horizonSizeBytes` controls lookahead and chunking
+  quality, not a `min + horizon` maximum chunk size. Multiplying cache entries by a
+  chunk-size bound describes decoded payload capacity, not total worker RSS or a safe
+  container limit: maps, mappings, buffers, FUSE and concurrent actions need headroom.
+- The virtual build directory's writable file pool holds action writes. Native
+  `maximumCacheFileCount` / `maximumCacheSizeBytes` instead bound the materialized input
+  file cache; neither configures the decoded CDC chunk cache.
+
 - **Concurrency (`concurrency`):** Parallel actions per worker (`vCPU count - 1`
   is a typical starting point for CPU-bound work). In `get_worker_fleet_health`,
   `cpu_user_p90` and `cpu_system_p90` are per-action CPU seconds, **not**
@@ -253,13 +279,20 @@ unknown without a discard counter or timestamp.
 
 ### Platform Queue Management
 
-Matching between an action's requested platform and a worker pool's advertised
-platform is **exact string equality** on the marshaled, lexicographically sorted
-`platformProperties` (`platformQueueKey` in `list_rbe_workers`). When updating a
-platform property value, update all three places together:
-1. Worker pool advertised `platformProperties`.
-2. Scheduler action-router / demultiplexing entries keyed on that platform.
-3. Autoscaler (KEDA/Prometheus) queries selecting on the serialized platform string.
+Matching uses the **final routed platform**, compared by exact string equality
+on the marshaled, lexicographically sorted `platformProperties`
+(`platformQueueKey` in `list_rbe_workers`), together with the instance-name prefix.
+Trace each selected action router: a demultiplexing backend can match the
+client's requested platform and then use a nested static extractor to replace
+it with a different worker platform. Its selector and destination need not be
+equal; that difference alone is not a routing mismatch. The rewrite does not
+change the Action or its digest and therefore does not rewrite Action Cache
+identity. Do not infer a nested backend's behavior from the default router.
+
+When changing a worker platform, reconcile its advertised properties, the
+router's destination (and any intentionally changed client selector), and
+autoscaler queries selecting the serialized destination platform. Preserve
+intentional input-to-destination rewrites.
 
 | Bazel outcome | Remote executions | Meaning |
 |---------------|-------------------|---------|
@@ -276,6 +309,12 @@ uniform `durationStats` clamp supports investigating a timeout, not a loader
 diagnosis. It does not prove a size-class cause or successful retry. Only
 `supersededBySuccessfulAttempt: true` establishes later success at the same
 digest; follow the failure flow in `SKILL.md` when the cause remains unresolved.
+
+Keep incident-time and current state separate. A historical Kubernetes warning
+is not an active fault without current corroboration. Today's ready workers,
+queue inventory, or saved scheduler source cannot establish what was registered
+or loaded during a past failed invocation. Use time-aligned events, metrics and
+configuration provenance; otherwise retain the historical cause as unknown.
 
 1. **Confirm invocation status and failure class:** Call `get_invocation` and
    record `status`, `exitCode`, `exitCodeName`, and `failureMessage`.

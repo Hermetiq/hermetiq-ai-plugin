@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "source": "Hermetiq/cloud-native/bep-nats/mcpv2/testdata/catalog/current.json",
-  "sourceRevision": "07220a4af925a1503aca82c7f7ee7ee85f69e878",
+  "sourceRevision": "b98d2946777b6a2ce9e3a3c12681cc16d12c81d8",
   "server": "hermetiq-mcp-v2",
   "serverVersion": "0.19.0",
   "tools": [
@@ -77,6 +77,7 @@
     "list_rbe_workers",
     "list_targets",
     "list_worker_pools",
+    "preview_size_class_training",
     "render_config_file",
     "resolve_build_or_invocation",
     "save_config_set",
